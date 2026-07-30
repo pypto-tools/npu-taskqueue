@@ -60,6 +60,10 @@ task-submit --device auto --run 'python train.py -d $TASK_DEVICE'
 # In code: device = os.environ.get("TASK_DEVICE", "0")
 ```
 
+The card number is a **physical** id. Nothing sets `ASCEND_RT_VISIBLE_DEVICES`,
+so there is no remapping to a logical 0 — pass the number through to the
+program instead of assuming it can use device 0.
+
 ### Submit without waiting
 
 ```bash
@@ -79,7 +83,12 @@ task-submit --kill <task-id>          # kill running task
 task-submit --clean                   # clean tasks older than 1 day
 task-submit --clean --days 7          # clean tasks older than 7 days
 task-submit --devices                 # show device whitelist
+task-submit --find "<substring>"      # task ids matching the full command
 ```
+
+Use `--find` when a script needs to locate a task. `--list` is for humans and
+truncates the command column at 77 characters, so matching against it fails
+silently for long commands.
 
 ## Decision Guide
 
@@ -95,7 +104,7 @@ When the user asks you to run something, decide:
 
 ## Important Notes
 
-- **`--device auto`**: daemon auto-assigns a free card from the whitelist (cards 4-15) and appends `--device <card>` to the command. Use `{}` or `$TASK_DEVICE` if your program uses a different flag.
+- **`--device auto`**: daemon auto-assigns a free card from the whitelist and appends `--device <card>` to the command. Use `{}` or `$TASK_DEVICE` if your program uses a different flag. Run `task-submit --devices` to see the current pool — do not assume a fixed card range.
 - **`--device N`**: daemon locks the specified card but does NOT append `--device` — user is responsible for passing the card number in the command.
 - **No `--device`**: no card allocated, no lock, no injection. For non-NPU commands.
 - **`--max-time` vs `--timeout`**: `--max-time` is server-side kill timer (default 300s). `--timeout` is client wait timer (default 600s). A timed-out client does NOT stop the task.

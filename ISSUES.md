@@ -1,4 +1,4 @@
-# TaskQueue: NPU 共享机器轻量任务队列
+# TaskQueue: a lightweight task queue for shared NPU machines
 
 ## Summary
 
@@ -32,11 +32,17 @@ TaskQueue solves this with:
 
 | Layer | Component | Mechanism | Purpose |
 |---|---|---|---|
-| Terminal isolation | `profile.d/taskqueue-npu.sh` | `ASCEND_RT_VISIBLE_DEVICES` | Hide protected cards from user shells |
+| Terminal isolation | `HwHiAiUser` group | `/dev/davinci*` is `0660 root:HwHiAiUser` | A restricted user's own shell cannot open a device |
 | Device mutex | `npu-lock` / flock | Per-device lock files | Prevent concurrent NPU access |
-| Device allocation | daemon / `available_devices` | Whitelist (currently `12,13,14,15`) | `--device auto` only assigns from protected pool |
+| Device allocation | daemon / `available_devices` | Whitelist (currently `0,1,2,3,12,13,14,15`) | Pool `--device auto` draws from |
 
 **Environment**: 16 NPU cards (physical 0-15), 50 restricted users, `MAX_CONCURRENT=15`.
+
+Terminal isolation used to be a `profile.d` script exporting
+`ASCEND_RT_VISIBLE_DEVICES`; that file is now a comment-only no-op and the
+`99-npu-taskqueue.rules` udev file is likewise inert. Nothing in the deployed
+path sets `ASCEND_RT_VISIBLE_DEVICES`, so **all device numbers are physical** —
+see issue 16.
 
 ### Task Lifecycle
 
@@ -76,7 +82,7 @@ User                        Daemon                      AICore
 
 **Device management**: `--device auto` allocates from whitelist, `--device-num N` for multi-card, `--devices "2,3,4,5"` hot-reloads whitelist via SIGHUP. npu-lock supports multi-card ascending-order locking with reentry detection.
 
-**Environment**: full env snapshot at submit time (`env -0`), `--env`/`--env-file` overrides, `~/.task-env` user-level setup script sourced before execution. `ASCEND_RT_VISIBLE_DEVICES` injected by daemon (not passed from user), `TASK_DEVICE` exposes physical card number.
+**Environment**: full env snapshot at submit time (`env -0`), `--env`/`--env-file` overrides, `~/.task-env` user-level setup script sourced before execution. `ASCEND_RT_VISIBLE_DEVICES` is stripped from the snapshot and never re-injected; `TASK_DEVICE` carries the physical card number.
 
 **Operations**: systemd service with PID singleton, maintenance mode, `--clean`, log rotation (1MB cap), colored `--list` output.
 
@@ -88,7 +94,21 @@ User                        Daemon                      AICore
 
 2. **Env snapshot world-readable** — `pending/` has permission 1777. The `.env` file captures the user's full environment (potentially including `*_API_KEY`, `*_SECRET`, `*_TOKEN`). Any user on the machine can read it. (task-submit.sh:320-329)
 
-3. **`parse_task_file` truncates values containing `=`** — Uses `IFS='=' read key value`, so `COMMAND=python train.py --lr=0.01` parses `value` as `python train.py --lr`. The scheduling path uses `cut -d= -f2-` (correct), but `run_task` calls `parse_task_file` (broken). (task-daemon.sh:21-41)
+3. ~~**`parse_task_file` truncates values containing `=`**~~ — **NOT A BUG (misdiagnosis, corrected 2026-07-29)**: `IFS='=' read -r key value` does not stop at the first `=`. `read` assigns everything left over to the *last* variable, delimiters included, so `COMMAND=python train.py --lr=0.01` yields `value=python train.py --lr=0.01`. Verified:
+
+   ```bash
+   $ printf 'COMMAND=python train.py --lr=0.01\n' |
+     while IFS='=' read -r k v; do echo "key=[$k] value=[$v]"; done
+   key=[COMMAND] value=[python train.py --lr=0.01]
+   ```
+
+   The real (much smaller) defect is that a **trailing** `=` is eaten, because a
+   single trailing non-whitespace IFS delimiter marks an empty final field:
+   `A=b=` parses as `value=b`. Both `parse_task_file` and `read_field` are
+   affected, so a command ending in `=` loses that character. Tracked below as
+   issue 20.
+
+12. **daemon does not verify task-file ownership** — `run_task` takes `SUBMIT_USER` from the task file body and never compares it against the file's owner, while `pending/` is world-writable (mode 1777) by design. The user identity a task runs as is therefore attacker-controlled rather than authenticated, and every check that lives in `task-submit` (blocked commands, device parsing, nesting guard) is bypassable by writing the file directly. `USER_HOME` has the same property and is sourced (`source $USER_HOME/.task-env`) before the command runs. Fix: derive the user from `stat -c %U` on the task file, reject root-owned files, resolve `USER_HOME` via `getent passwd`, and validate `DEVICE` / `MAX_TIME` / `WORK_DIR` against strict patterns before interpolating them into a shell string. (task-daemon.sh:349-468, setup.sh:149)
 
 4. ~~**Unknown option silently becomes the task command → CI passes without running anything**~~ — **RESOLVED (2026-07-14)**: the option loop ended in `*) break`, so an unrecognized flag stopped parsing and everything after it — including `--run` — was dropped. `$1` then fell through the main `case` to `submit_task "$1"`, submitting the literal flag string as the command; with `RUN_MODE` unset, `task-submit` printed a task-id and exited **0**.
 
@@ -104,7 +124,7 @@ User                        Daemon                      AICore
 
     The test side is fixed separately — CPython leaves SIGTERM at `SIG_DFL`, so `finally`/`atexit` never run on a plain `kill`; the test now installs a SIGTERM handler that raises, and sets `PR_SET_PDEATHSIG` as a backstop for SIGKILL.
 
-### P1 — User Experience
+### P1 — Correctness / User Experience
 
 5. **Blocked command filter false positives** — Substring regex matching: `passwd`, `shutdown`, `reboot` etc. have no word boundaries. `cat /etc/passwd`, `grep shutdown /var/log`, `python train.py --tag reboot-exp` all rejected. (task-submit.sh:257-279)
 
@@ -116,48 +136,71 @@ User                        Daemon                      AICore
 
    Surfaced as "the devices it says it locked don't match the ones it actually locked": an 8-card task emits 16 npu-lock lines (2 per device), so `tail -f` began at line 7 and the locks for the first 3 cards were invisible. Nothing was wrong with the locking. Fixed by `tail -n +1 -f`.
 
+13. **`reap_orphans` finalizes a task while `run_task` is still sweeping it** — `reap_orphans` fires once the leader pid has been dead for 5 consecutive polls (~1s at `POLL_INTERVAL=0.2`). But after `wait` returns, `run_task` calls `sweep_task`, which takes up to `KILL_GRACE` (default 5s) whenever descendants outlived the leader — i.e. exactly the case `sweep_task` exists for. The reaper wins the race and writes `done/` with `EXIT_CODE=137` plus "任务被中断（daemon 停止或重启）" in the log, so a **successful** task is reported to `--wait` as killed; it also removes the `running/` file early, freeing the device for scheduling while the sweep is still killing processes that hold it. `run_task` then overwrites `done/` with the real exit code. Fix: have `run_task` claim the task before sweeping (write `FINALIZING=$$` into the running file and skip those in `reap_orphans`), or raise the threshold above `KILL_GRACE / POLL_INTERVAL`. (task-daemon.sh:489-523, 615-639)
+
+14. **A missing option argument spins forever** — the option loop uses `shift 2` for `--timeout`, `--device-num`, `--days`, `--env`, `--env-file`, and `--max-time`. Bash leaves the positional parameters untouched when `n > $#`, so `$1` never changes and the `while` loop never exits: `task-submit --timeout` burns 100% of a core and never returns. Only `--device` has a missing-argument check. (task-submit.sh:163-196)
+
+15. **Numeric options are not validated, and both failure modes are silent** — `--max-time abc` makes the daemon's `[ "$MAX_TIME" -gt 0 ] 2>/dev/null` fail, which **disables the watchdog** (the task never times out); `--timeout abc` evaluates to 0 in `[[ $TIMEOUT -eq 0 ]]`, which means **wait forever**. Neither prints a warning. `--device-num` already has `is_positive_int`; apply it to the other two. (task-submit.sh:165, 182)
+
+16. **Documentation describes a device-numbering scheme that no longer exists** — README and GUIDE both state "always use logical device 0, 1, 2… in your code, never hard-code the physical card number". That was true when `ASCEND_RT_VISIBLE_DEVICES` was injected and CANN remapped the visible cards to a 0-based range. Nothing sets that variable any more: `taskqueue-npu.sh` is a comment-only no-op, the daemon injects only `TASK_DEVICE`, and `task-submit` strips `ASCEND_RT_VISIBLE_DEVICES` out of the environment snapshot. Card numbering seen by the task is therefore **physical**, and the auto-appended `--device N` carries a physical id. Following the old instruction means locking card 13 and running on card 0 — the exact double-occupancy this system exists to prevent. Related drift: the whitelist is documented three different ways (`conf/available_devices` = `0,1,2,3,12,13,14,15`, README = `12,13,14,15`, `claude-skill/task-submit/SKILL.md` = "cards 4-15"), and the "three-layer design" table still lists terminal isolation via `ASCEND_RT_VISIBLE_DEVICES` as an active layer when the actual mechanism is `HwHiAiUser` group membership. (Docs corrected 2026-07-29; the whitelist numbers still need an owner's decision.)
+
 ### P2 — Edge Cases
 
 9. **task-id collision under concurrency** — `task_$(date)_${$}${RANDOM}`: same PID in a loop, `$RANDOM` range 0-32767, theoretical collision within one second. (task-submit.sh:302)
 
-10. ~~**Non-interactive submit silently skips device check**~~ — **RESOLVED**: `--device auto` is now the default. No interactive prompt needed; both interactive and non-interactive paths behave identically.
+10. ~~**Non-interactive submit silently skips device check**~~ — **RESOLVED**: the `warn_no_lock` interactive prompt is gone, so the interactive and non-interactive paths behave identically. (The original note claimed this was fixed by making `--device auto` the default — see issue 17, that part never landed.)
 
-## Implemented: Transparent Device Allocation
+17. **`--device auto` is not the default, contrary to what this document claimed** — the "Implemented: Transparent Device Allocation" section asserted that a bare `task-submit --run "..."` allocates a card and that `--no-device` opts out. In the code, `LOCK_DEVICE` defaults to empty, `build_device_request` returns an empty string, and the daemon then allocates nothing, locks nothing, and injects no `TASK_DEVICE`. GUIDE and the skill file document the actual behaviour (an explicit `--device auto` is required); this file was the outlier. Either implement the default or drop the idea — but the two must not disagree, because "the docs say a card is allocated" is how a job ends up racing a terminal user for a card. (task-submit.sh:33, 223-241)
 
-`--device auto` is now the default behavior. Users no longer need to specify `--device auto` explicitly:
+18. **Kill markers and interactive FIFOs are not owner-checked** — `process_kills` acts on any file present in `kill/`, and the interactive FIFO is created world-writable; both directories are mode 1777, and task ids are public via `--list`. A user can therefore terminate another user's job or write into its stdin. Fix: compare `stat -c %U` on the marker against the target task's owner, and create FIFOs owned by the submitting user with mode 600. (task-daemon.sh:452-461, 661-708, setup.sh:151)
 
-```bash
-# These are equivalent:
-task-submit --run "python train.py"              # auto is implicit
-task-submit --device auto --run "python train.py" # still works
+19. **`--list` renders orphan `.env` snapshots as tasks** — the Pending loop skips `*.env`, the Running loop does not, so a snapshot left in `running/` (up to 60s, until `reap_orphan_envs` collects it) appears as a task row with an empty command. One missing line. (task-submit.sh:1168-1169)
 
-# Opt out for non-NPU tasks:
-task-submit --no-device --run "make build"
+20. **Trailing `=` is stripped from task-file values** — `IFS='=' read -r k v` treats a single trailing delimiter as an empty final field, so `COMMAND=... base64 -d <<< $x=` loses the final character. Affects `parse_task_file` and `read_field`. Use `v="${line#*=}"` instead. (task-daemon.sh:23-62)
+
+21. **A killed task reports exit 130, not 143** — `npu-lock`'s SIGTERM trap ends with a hard-coded `exit 130`, which propagates through `bash -c` and `runuser` into the `done/` record. `wait_task` only special-cases 143 as "任务已终止", so a deliberately killed task is displayed as "任务失败 (exit=130)". Either have the trap re-raise the signal (`trap - TERM; kill -TERM $$`) or teach the client that 130/137/143 all mean "terminated". (npu_lock.sh:263-274, task-submit.sh:819)
+
+22. **`--device` accepts arbitrary strings** — the value is stored verbatim, later interpolated into `sed -i "s/^DEVICE=.*/DEVICE=$dev/"` and into the `bash -c` string the daemon builds. It executes as the submitting user, so this is not an escalation, but a value containing `/` breaks the `sed` rewrite and leaves `DEVICE=auto` in the running file. Validate against `^(auto|none|[0-9]+(,[0-9]+)*)$` at submit time and again in the daemon. (task-submit.sh:166-173, task-daemon.sh:440-442)
+
+23. **`deploy.sh` restarts the daemon unconditionally and kills every running task** — `taskqueue.service` does not set `KillMode`, so the default `control-group` applies and `systemctl restart` SIGTERMs everything in the service cgroup, setsid'd tasks included; `reconcile_running` then records them as `EXIT_CODE=137`. Deploying during working hours silently destroys other people's jobs. Fix: check `running/` first and refuse (or require `--force`), and prefer draining via `--maintenance on`. (deploy.sh:46, taskqueue.service)
+
+24. **`conf/restricted-users` is deployed but never read** — `deploy.sh` copies it to `/etc/taskqueue-restricted-users` and no script in the repository ever opens that path. The actual restriction is manual `gpasswd -d <user> HwHiAiUser`. The file is documentation masquerading as configuration: editing it and running `deploy.sh` changes nothing, which is a trap for whoever maintains the roster next. Either make `deploy.sh` reconcile group membership from it, or state in the file that it is a record only. (deploy.sh:36-43)
+
+25. ~~**`deploy.sh` overwrites `/etc/taskqueue.conf`, silently repointing a `BASE_DIR` set at install time**~~ — **RESOLVED (2026-07-29)**: `setup.sh` accepts `--base-dir` and every host chooses its own, but `deploy.sh` copied `conf/taskqueue.conf` over `/etc/taskqueue.conf` unconditionally. When the two disagreed, a routine update moved the queue to a different directory — `pending/`, `running/`, `done/` and the locks all stayed under the old `BASE_DIR`, the daemon kept using the old path until it restarted, and clients switched immediately. Worse than a clean break: `set -e` then aborted at the next line (`cp conf/available_devices "$BASE_DIR/available_devices"`, into a directory that does not exist), leaving new scripts installed, the conf repointed, and **no restart** — so the daemon went on running the old code while every user's `task-submit` failed to write a task file.
+
+    Fix: `BASE_DIR` is now treated as a per-machine property. `deploy.sh` reads the host's existing `/etc/taskqueue.conf` and keeps its `BASE_DIR`, syncing only the other keys from the repository; the committed value is used solely when the host has no conf at all. Host-only keys (e.g. `KILL_GRACE`) are carried over instead of being erased, and the script now validates that `BASE_DIR` exists **before** copying anything, so a misconfigured host fails cleanly instead of half-deployed. (deploy.sh:12-69, conf/taskqueue.conf)
+
+## Implemented: Privilege Separation via the `HwHiAiUser` Group
+
+NPU access is enforced through `task-submit` by Linux group-based device
+permissions. `/dev/davinci*` is `0660 root:HwHiAiUser` (the group is created by
+the CANN driver installer, so no `groupadd` and no udev rule of our own are
+needed). Restricted users are removed from that group, so their own shell cannot
+open a device; the daemon adds it back for the duration of the task:
+
+```text
+User shell (not in HwHiAiUser) → /dev/davinci* is 0660 → access denied
+task-submit → daemon (root) → runuser -u $USER --supp-group HwHiAiUser → access granted
 ```
 
-The `warn_no_lock` interactive prompt has been removed — no longer needed.
+The task still runs as the submitting user, so it reads and writes that user's
+files normally; the only thing it gains is device access. No ACLs and no
+two-phase uid switching.
 
-## Proposed Next Step: Privilege Separation via hwhiaiuser Group
+Two caveats worth knowing:
 
-### Goal
+- Group membership is edited **by hand** (`gpasswd -d <user> HwHiAiUser`).
+  `conf/restricted-users` is a record of who should be restricted, not an input
+  to anything — see issue 24.
+- This separates *users* from the devices. It does not separate users from the
+  *queue*: `pending/` is world-writable, and the daemon believes what it reads
+  there — see issue 12. Fixing that is the next step.
 
-Enforce NPU access exclusively through `task-submit` by using Linux group-based device permissions.
+## Proposed Next Step: Authenticate the Task File
 
-### Design
-
-Create a `hwhiaiuser` group that owns `/dev/davinci*` devices. Users' normal shells don't have this group, so they can't access NPU directly. The daemon injects the group via `runuser --supp-group hwhiaiuser` when executing tasks.
-
-```
-User shell (no hwhiaiuser group) → /dev/davinci* is 0660 → access denied
-task-submit → daemon (root) → runuser -u $USER --supp-group hwhiaiuser → access granted
-```
-
-Steps:
-1. `groupadd -f hwhiaiuser`
-2. udev rule: `KERNEL=="davinci[0-9]*", GROUP="hwhiaiuser", MODE="0660"`
-3. daemon: `runuser -u "$SUBMIT_USER" --supp-group hwhiaiuser -- ...`
-
-Advantages:
-- Task still runs as submitting user (can access user files/dirs)
-- Only gains device access via supplementary group
-- No complex ACL or two-phase switching needed
+Make the daemon trust the filesystem instead of the file body: take the
+submitting user from `stat -c %U`, refuse root-owned task files, resolve
+`USER_HOME` from `getent passwd`, and pattern-check every field the daemon
+interpolates into a shell string. This closes issue 12 and, with it, all the
+client-side checks that are currently bypassable by writing to `pending/`
+directly.

@@ -1,96 +1,164 @@
 # TaskQueue
 
-面向 Ascend NPU 共享机器的轻量任务队列，解决多人抢卡冲突。
+A lightweight task queue for shared Ascend NPU machines. It removes the "who
+gets which card" scramble: users submit commands with `task-submit`, a root
+daemon allocates a free card, takes a lock on it, and runs the command as the
+submitting user.
 
-## 设计方案
+Documentation in this repository is written in English — see
+[`.claude/rules/docs-language.md`](.claude/rules/docs-language.md). Messages
+printed by the scripts themselves stay in Chinese, because that is what the
+people on this machine read.
 
-### 设备分区
+New here? [`GUIDE.md`](GUIDE.md) is the user-facing manual — also available in
+Chinese as [`GUIDE_ZH.md`](GUIDE_ZH.md). [`ISSUES.md`](ISSUES.md) tracks known
+defects and past incidents — read it before changing the kill or scheduling
+paths.
 
-本机共 16 张 NPU 卡（物理编号 0-15）：
+## Design
 
-| 区域 | 物理卡号 | 终端可见 | `--device auto` 可分配 | 说明 |
-|---|---|---|---|---|
-| 自由卡 | 0-11 | 是 | 否 | 用户终端可直接使用 |
-| 保护卡 | 12-15 | 否 | 是 | 只能通过 `task-submit` 使用 |
+### Device pool
 
-### 三层机制
+The machine has 16 NPU cards (physical 0-15). `conf/available_devices` defines
+the pool that `--device auto` draws from; it currently holds
+`0,1,2,3,12,13,14,15`.
 
-| 层 | 负责组件 | 机制 | 作用 |
+An explicit `--device N` is **not** restricted to that pool — the whitelist only
+constrains automatic allocation.
+
+> The original design reserved 0-11 as "free" cards for direct terminal use and
+> 12-15 as a protected pool. The pool in use is deliberately wider than that.
+> `conf/available_devices` is the authority — do not infer the pool from the
+> historical split.
+
+### Three layers
+
+| Layer | Component | Mechanism | Purpose |
 |---|---|---|---|
-| 终端隔离 | `profile.d/taskqueue-npu.sh` | `ASCEND_RT_VISIBLE_DEVICES=0,...,11` | 用户终端看不到保护卡 |
-| 设备互斥 | `npu-lock` / flock | 文件锁 | 队列任务之间不抢卡 |
-| 设备分配 | daemon / `available_devices` | 白名单 `12,13,14,15` | `--device auto` 只选保护卡 |
+| Device access | `HwHiAiUser` group | `/dev/davinci*` is `0660 root:HwHiAiUser` | A restricted user's own shell cannot open a device |
+| Device mutex | `npu-lock` / flock | One lock file per device | Two queued tasks never share a card |
+| Device allocation | daemon / `available_devices` | Whitelist | Bounds what `--device auto` may hand out |
 
-### 任务执行流程
+Access control is group membership: restricted users are removed from
+`HwHiAiUser`, and the daemon adds the group back for the duration of a task via
+`runuser --supp-group HwHiAiUser`. The membership list is maintained by hand
+(`gpasswd -d <user> HwHiAiUser`); `conf/restricted-users` records who should be
+restricted but is not read by any script.
 
-1. 用户通过 `task-submit` 提交任务，自动快照环境变量
-2. daemon 从白名单分配空闲设备（auto 模式）或使用指定设备
-3. `npu-lock` 获取设备文件锁
-4. `runuser` 降权，以提交用户身份执行任务
-5. 任务结束后释放锁，记录结果
+`taskqueue-npu.sh` (profile.d) and `99-npu-taskqueue.rules` (udev) are inert
+placeholders kept for deployment symmetry. Neither sets anything.
 
-### 环境变量处理
+### Task lifecycle
 
-- 提交时快照用户完整环境（排除 `ASCEND_RT_VISIBLE_DEVICES`，由 daemon 控制）
-- daemon 注入 `ASCEND_RT_VISIBLE_DEVICES=<分配的物理卡号>`，CANN runtime 重映射为从 0 开始的逻辑编号
-- `TASK_DEVICE` 环境变量告知程序分配了哪张物理卡
-- 代码里永远用逻辑编号 0, 1, 2...，不要硬写物理卡号
+1. `task-submit` writes a task file into `pending/` and snapshots the user's
+   environment next to it.
+2. The daemon allocates a device from the whitelist (`auto` mode) or uses the
+   requested one, then moves the task to `running/`.
+3. `npu-lock` takes an exclusive `flock` on each allocated device.
+4. `runuser` drops privileges to the submitting user, with `HwHiAiUser` added.
+5. On exit the daemon sweeps surviving descendants, releases the locks, and
+   writes a `done/` record.
 
-## 组件
+### Device numbering
 
-| 文件 | 用途 |
+**Card numbers are physical.** Nothing in the deployed path sets
+`ASCEND_RT_VISIBLE_DEVICES` — `task-submit` even strips it out of the
+environment snapshot — so there is no remapping and no logical 0-based view.
+
+The daemon tells a task which card it got in three interchangeable ways:
+
+- appends `--device <N>` to the command (only for `--device auto`, and only when
+  the command does not already specify a device),
+- substitutes `{}` anywhere in the command,
+- exports `TASK_DEVICE=<N>`.
+
+Use whichever fits the program, but use one of them. Hard-coding a card number,
+or assuming the allocated card appears as device 0, means holding a lock on one
+card and computing on another.
+
+## Components
+
+| File | Role |
 |---|---|
-| `task-submit.sh` | 用户入口：提交、等待、查看日志、管理任务 |
-| `task-daemon.sh` | 常驻调度：扫描队列、分配设备、降权执行、超时管理 |
-| `npu_lock.sh` | 设备互斥锁：基于 flock，进程退出自动释放 |
-| `taskqueue-npu.sh` | profile.d 脚本：登录时注入 `ASCEND_RT_VISIBLE_DEVICES` |
-| `99-npu-taskqueue.rules` | udev 规则（当前已禁用，仅靠环境变量隔离） |
-| `taskqueue.service` | systemd 服务 |
-| `setup.sh` | 首次安装 |
-| `deploy.sh` | 一键部署更新 |
+| `task-submit.sh` | User CLI: submit, wait, log, cancel, kill, list, clean, maintenance, device whitelist |
+| `task-daemon.sh` | Root daemon: poll `pending/`, allocate devices, drop privileges, watchdog, reap orphans |
+| `npu_lock.sh` | flock-based device mutex; multi-card locking in ascending order to avoid deadlock |
+| `taskqueue-npu.sh` | profile.d placeholder (inert) |
+| `99-npu-taskqueue.rules` | udev placeholder (inert — CANN owns the device nodes) |
+| `taskqueue.service` | systemd unit |
+| `setup.sh` | First-time install, system-wide or `--local` |
+| `deploy.sh` | Re-deploy after source changes |
+| `claude-skill/task-submit/` | Skill shipped to *users* of the queue, to be installed on their machines |
+| `.claude/` | Rules and skills for developing *this* repository |
 
-## 目录结构
+## Layout
 
-### 源码目录
+### Source
 
-```
-taskqueue/
-├── conf/                          # 配置文件（修改这里）
+```text
+npu-taskqueue/
+├── conf/                          # configuration — edit here, then deploy
 │   ├── taskqueue.conf             # BASE_DIR, MAX_CONCURRENT
-│   ├── available_devices          # --device auto 白名单（当前: 12,13,14,15）
-│   └── restricted-users           # 受限用户名单
+│   ├── available_devices          # --device auto pool
+│   └── restricted-users           # roster (git-ignored; .example is committed)
 ├── task-daemon.sh
 ├── task-submit.sh
 ├── npu_lock.sh
 ├── taskqueue-npu.sh
 ├── 99-npu-taskqueue.rules
 ├── taskqueue.service
+├── taskqueue-clean.cron
 ├── deploy.sh
 ├── setup.sh
-├── GUIDE.md                       # 用户使用说明
-└── README.md                      # 本文档
+├── docs/                          # topic docs (interactive mode, …)
+├── claude-skill/                  # skill for queue users
+├── .claude/
+│   ├── CLAUDE.md                  # index for agents working on this repo
+│   ├── rules/                     # conventions (see below)
+│   └── skills/                    # verify, deploy, code-review, git-commit, …
+├── AGENTS.md                      # short pointer for non-Claude agents
+├── GUIDE.md                       # user manual
+├── GUIDE_ZH.md                    # its Chinese mirror — edit both together
+├── ISSUES.md                      # known defects and incident history
+└── README.md                      # this file
 ```
 
-### 运行目录（BASE_DIR）
+`.claude/rules/` holds the conventions that apply to the whole repository:
 
-```
+| Rule | Covers |
+|---|---|
+| `core-development.md` | Bash correctness, the root/user boundary, kill paths, secrets |
+| `deployment-integrity.md` | The repo is the source of truth; deploy pre-flight |
+| `problem-handling.md` | Where a defect gets recorded, and what may be published |
+| `docs-language.md` | English Markdown, Chinese CLI output |
+| `documentation-length.md` | Size limits and how to split |
+
+### Runtime (`BASE_DIR`)
+
+```text
 /var/lib/taskqueue/
-├── pending/           待调度任务
-├── running/           正在执行的任务
-├── done/              已完成任务元数据
-├── logs/              任务日志
-├── locks/             NPU 锁文件
-├── kill/              终止请求标记
-├── available_devices  设备白名单
-├── taskqueue.log      daemon 日志（自动轮转，上限 1MB）
+├── pending/           queued tasks (mode 1777)
+├── running/           in-flight tasks
+├── done/              completion records
+├── logs/              per-task logs
+├── locks/             NPU lock files
+├── kill/              termination requests
+├── fifo/              stdin pipes for interactive tasks
+├── available_devices  runtime whitelist (SIGHUP reloads it)
+├── maintenance        present ⇒ scheduling paused
+├── taskqueue.log      daemon log (rotates at 1 MB)
 └── task-daemon.pid
 ```
 
-## 部署
+## Deployment
 
-### 部署位置
+**The repository is the source of truth.** Never edit `/usr/local/bin/task-submit`
+or the other installed copies in place — a later `deploy.sh` silently rolls those
+edits back. That is not hypothetical: it produced a CI job that reported green
+for a week without running its tests (`ISSUES.md`, issue 4). See
+[`.claude/rules/deployment-integrity.md`](.claude/rules/deployment-integrity.md).
 
-| 源文件 | 部署位置 |
+| Source | Installed to |
 |---|---|
 | `task-daemon.sh` | `/usr/local/sbin/task-daemon` |
 | `task-submit.sh` | `/usr/local/bin/task-submit` |
@@ -98,52 +166,86 @@ taskqueue/
 | `taskqueue.service` | `/etc/systemd/system/taskqueue.service` |
 | `99-npu-taskqueue.rules` | `/etc/udev/rules.d/` |
 | `taskqueue-npu.sh` | `/etc/profile.d/` |
+| `taskqueue-clean.cron` | `/etc/cron.d/taskqueue-clean` |
 | `conf/taskqueue.conf` | `/etc/taskqueue.conf` |
 | `conf/available_devices` | `/var/lib/taskqueue/available_devices` |
 | `conf/restricted-users` | `/etc/taskqueue-restricted-users` |
 
-### 首次安装
+### First install
 
 ```bash
 sudo bash setup.sh --max-concurrent 15
 ```
 
-### 更新
+A `--local` mode installs everything under `$HOME` for testing, with no root and
+no impact on the shared queue:
 
-修改源码或配置后，一键同步：
+```bash
+bash setup.sh --local --max-concurrent 2
+```
+
+### Update
 
 ```bash
 sudo bash deploy.sh
 ```
 
-### 常用管理
+`deploy.sh` restarts the daemon, and the default systemd `KillMode` takes the
+running tasks down with it. Check for in-flight work first:
 
 ```bash
-# daemon 状态
-sudo systemctl status taskqueue
-
-# daemon 日志
-cat /var/lib/taskqueue/taskqueue.log
-
-# 重启 daemon
-sudo systemctl restart taskqueue
+task-submit --list                     # anything under "Running"?
+sudo task-submit --maintenance on "deploying"   # stop new work, let running drain
+sudo bash deploy.sh
+sudo task-submit --maintenance off
 ```
 
-### 管理受限用户
+`BASE_DIR` is per-machine and is **not** synced. `deploy.sh` keeps whatever the
+host's `/etc/taskqueue.conf` already says, syncs the other keys from
+`conf/taskqueue.conf`, preserves any host-only keys it finds, and refuses to
+start if `BASE_DIR` does not exist. The value committed here is only the
+fallback for a host that has never been installed.
 
-编辑 `conf/restricted-users`，然后 `sudo bash deploy.sh`。用户需重新登录生效。
-
-### 修改保护卡范围
-
-1. 编辑 `conf/available_devices`（auto 白名单）
-2. 编辑 `taskqueue-npu.sh`（终端可见设备）
-3. `sudo bash deploy.sh`
-4. 用户重新登录生效
-
-### 维护模式
+### Day-to-day
 
 ```bash
-sudo task-submit --maintenance on "升级驱动"
+sudo systemctl status taskqueue                       # daemon state
+BASE_DIR=$(. /etc/taskqueue.conf; echo "$BASE_DIR")   # this host's data dir
+cat "$BASE_DIR/taskqueue.log"                         # daemon log
+sudo systemctl restart taskqueue                      # restart (kills running tasks)
+```
+
+### Changing the restricted-user roster
+
+Edit `conf/restricted-users`, then apply the group change by hand — `deploy.sh`
+copies the file but nothing reads it:
+
+```bash
+sudo gpasswd -d <user> HwHiAiUser      # restrict
+sudo gpasswd -a <user> HwHiAiUser      # unrestrict
+```
+
+The user must log out and back in for the group change to take effect.
+
+### Changing the device pool
+
+At runtime, without a deploy (takes effect immediately via SIGHUP):
+
+```bash
+sudo task-submit --devices "2,3,4,5"
+sudo task-submit --devices status
+sudo task-submit --devices reset       # back to auto-detection
+```
+
+Persistently: edit `conf/available_devices` and run `sudo bash deploy.sh`. Note
+that a deploy overwrites whatever `--devices` set at runtime.
+
+### Maintenance mode
+
+```bash
+sudo task-submit --maintenance on "CANN driver upgrade"
 sudo task-submit --maintenance status
 sudo task-submit --maintenance off
 ```
+
+Queued tasks stop being scheduled; running tasks continue.
