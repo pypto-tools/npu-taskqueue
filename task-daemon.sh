@@ -490,6 +490,16 @@ reconcile_running() {
 run_task() {
     local task_id="$1"
 
+    # 监管进程（本函数所在的后台 fork）的 pid，供 reap_orphans 判断"任务是否正在
+    # 正常收尾"。必须用 $BASHPID 而非 $$：`run_task ... &` 是子 shell，$$ 在其中
+    # 仍是 daemon 自己的 pid，写进去会让每个任务都被判成"有活的监管进程"，孤儿
+    # 回收将彻底失效、设备永久泄漏。
+    #
+    # 写在函数第一行而不是与 TASK_PID 并排：这样连"run_task 在 exec 出 leader
+    # 之前就挂掉"的窗口也被覆盖——那种 running 文件没有 TASK_PID，旧逻辑会永远
+    # 跳过它，设备再也回不来。
+    echo "RUN_TASK_PID=$BASHPID" >> "$RUNNING_DIR/$task_id"
+
     parse_task_file "$RUNNING_DIR/$task_id"
 
     # 兜底: 避免 auto / auto:N 直接传给 npu-lock
@@ -916,25 +926,51 @@ count_running_tasks() {
 JOB_PIDS=()
 declare -A REAP_SEEN   # task_id -> 连续观察到 leader 已死的轮数
 
-# 周期回收：扫描 running/，leader 已死但没人收尾的任务（监管它的 run_task 已消失，
-# 例如 daemon 曾被 systemd cgroup 整组杀过）→ 扫会话 + 收尾，释放调度槽和 NPU。
-# 正常完成时 run_task 会在 leader 退出后立刻收尾、删 running，故给若干轮宽限以避开竞态。
+# 监管进程（run_task 的后台 fork）是否还活着。
+#
+# 只 kill -0 不够：pid 被复用后，一个无关进程会让该任务永远逃过回收。run_task 由
+# 主循环 `run_task ... &` 直接 fork，故父进程必然是本 daemon；比对 ppid 就能把撞车
+# 的复用 pid 排除掉。/proc/<pid>/stat 的解析方式同 session_pids：comm 字段可能含
+# 空格和括号，先剥到最后一个 ") "，剩下 state(1) ppid(2) pgrp(3) session(4) ...
+owner_alive() {
+    local pid="$1" line
+    [ -n "$pid" ] || return 1
+    { read -r line < "/proc/$pid/stat"; } 2>/dev/null || return 1
+    line="${line##*) }"
+    set -- $line
+    [ "$2" = "$$" ]
+}
+
+# 周期回收：扫描 running/，没人收尾的任务（监管它的 run_task 已消失，例如 daemon
+# 曾被 systemd cgroup 整组杀过）→ 扫会话 + 收尾，释放调度槽和 NPU。
+#
+# 判据是"监管进程死活"，不是"leader 死活"。leader 正常退出后，run_task 还要在
+# sweep_task 里清扫脱离出去的后代，有残留时最长卡 KILL_GRACE 秒（另加一次全 /proc
+# 扫描），期间 running 文件仍在。只看 leader 的话，这段收尾窗口会被当成孤儿：任务
+# 被写「任务被中断」、running 文件被提前删除——卡在残留进程还没清完时就被判为空闲，
+# 随后 run_task 再用 exit=0 覆盖 done 记录，留下"PASS 却标记中断"的矛盾现场。
 reap_orphans() {
-    local rf task_id tpid
+    local rf task_id tpid owner
     for rf in "$RUNNING_DIR"/task_*; do
         [ -f "$rf" ] || continue
         case "$rf" in *.env) continue;; esac
         task_id=$(basename "$rf")
+        owner=$(read_field RUN_TASK_PID "$rf")
+        if owner_alive "$owner"; then
+            unset 'REAP_SEEN[$task_id]'            # 有人在管，收尾中或运行中
+            continue
+        fi
+        # owner 为空 = 旧 daemon 写下的 running 文件，退回只看 leader 的旧判据。
         tpid=$(read_field TASK_PID "$rf")
-        [ -z "$tpid" ] && continue                 # 尚未写入 pid，跳过
-        if kill -0 "$tpid" 2>/dev/null; then
-            unset 'REAP_SEEN[$task_id]'            # leader 存活，正常运行
+        if [ -n "$tpid" ] && kill -0 "$tpid" 2>/dev/null; then
+            unset 'REAP_SEEN[$task_id]'            # leader 存活，任务仍合法占用设备
             continue
         fi
         REAP_SEEN[$task_id]=$(( ${REAP_SEEN[$task_id]:-0} + 1 ))
-        [ "${REAP_SEEN[$task_id]}" -lt 5 ] && continue   # 给 run_task 收尾的机会
-        log "reap: $task_id leader $tpid dead with no owner, sweeping + finalizing"
-        sweep_task "$task_id" "$tpid" reap
+        # 宽限若干轮，避开 mv 进 running/ 与 run_task 写下 RUN_TASK_PID 之间的空档。
+        [ "${REAP_SEEN[$task_id]}" -lt 5 ] && continue
+        log "reap: $task_id leader ${tpid:-none} dead with no owner, sweeping + finalizing"
+        sweep_task "$task_id" "${tpid:-0}" reap
         finalize_interrupted "$task_id" 137
         unset 'REAP_SEEN[$task_id]'
     done
