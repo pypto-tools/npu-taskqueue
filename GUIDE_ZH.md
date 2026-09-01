@@ -197,6 +197,43 @@ task-submit --find "<子串>"          # 按完整命令匹配，只输出 task-
 找到的 `task-submit.conf`。输出还会计算 daemon 最终可分配的 auto 候选集合，并
 提示空交集、被全局池排除的卡和固定 `DEVICE_SEQ_N` 超出全局池等兼容行为。
 
+### 同 HCCS plane 借卡（卡组）
+
+有些服务器的卡分属不同的 HCCS plane（通信域），跨 plane 的多卡通信在
+pypto/simpler 上不会报错返回，而是挂起并把卡楔死到只能靠平台带外 reset。
+
+服务器管理员在 `config/taskqueue.conf` 里声明本机拓扑，分号分组、组内逗号分隔：
+
+```bash
+DEVICE_GROUPS="0,1;2,3"     # 0 和 1 同组，2 和 3 同组
+```
+
+需要同组借卡的仓库在自己的 `task-submit.conf` 里开启：
+
+```bash
+DEVICE_GROUP_AFFINITY=1
+```
+
+开启后本仓的多卡任务必须整体落在一个组内：
+
+- `--device auto --device-num N` 只会从某个有 N 张空闲卡的组里整组分配；哪个组
+  由 daemon 在调度时决定，所以一个组忙着不会挡住另一个空闲组。凑不齐就继续排队，
+  绝不会跨组凑数。
+- 显式 `--device 0,2` 或跨组的 `DEVICE_SEQ_N` 在提交时直接报错，并指出每张卡属于
+  哪个组。
+- 请求卡数超过最大卡组时（如 024 上要 3 张而每组只有 2 张）当场报错，不会排队等
+  一个永远不会出现的组合。
+
+未配置 `DEVICE_GROUPS` 时，本机拓扑视为**未知**，而不是"所有卡同 plane"——真的
+单 plane 的机器应显式写成一个大组（如 `DEVICE_GROUPS="0,1,2,3"`）。此时开启了
+`DEVICE_GROUP_AFFINITY` 的仓库，其多卡任务会在提交时报错，直到管理员补上拓扑；
+单卡任务和未开启的仓库都不受影响。
+
+`task-submit --devices status` 会显示本机卡组、本仓的同组候选，以及单次请求的
+多卡上限。确实能跨 plane 的负载（如 torch_npu 纯 HCCL collective 加
+`HCCL_INTRA_ROCE_ENABLE=1`）用 `--ignore-group-affinity`（或
+`TASKQUEUE_IGNORE_GROUP_AFFINITY=1`）放行。
+
 ## 管理
 
 ```bash

@@ -394,6 +394,7 @@ bash "$REPO_DIR/tests/test_deploy_upgrade_guard.sh"
 bash "$REPO_DIR/tests/test_eight_card_limit.sh"
 bash "$REPO_DIR/tests/test_scheduler_core.sh"
 bash "$REPO_DIR/tests/test_pool_aware_reservation.sh"
+bash "$REPO_DIR/tests/test_device_group_affinity.sh"
 bash "$REPO_DIR/tests/test_repo_auto_update_adapter.sh"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR" \
     python3 -m unittest discover -s "$REPO_DIR/tests" -p 'test_update_manifest.py'

@@ -80,9 +80,135 @@ scheduler_effective_pool() {
     printf '%s' "$joined"
 }
 
+# --- HCCS plane affinity ----------------------------------------------------
+#
+# DEVICE_GROUPS declares which cards share a communication domain (HCCS plane)
+# on this host, for example DEVICE_GROUPS="0,1;2,3". A task whose repository set
+# DEVICE_GROUP_AFFINITY must take all of its cards from one group: pypto and
+# simpler build their data plane on ACL VMM Fabric handles, which cannot be
+# established across planes. The resulting collective does not fail, it hangs,
+# and the cards stay wedged until the platform resets them out of band.
+#
+# Affinity is a host invariant rather than a policy choice, so the core applies
+# it inside allocation and revalidates it before claiming a task. Policy modules
+# need no changes and cannot bypass it.
+
+SCHEDULER_TASK_GROUP_AFFINITY=0
+SCHEDULER_GROUPS_LOADED=0
+SCHEDULER_GROUPS_LOADED_SPEC=""
+declare -A SCHEDULER_GROUP_OF=()
+
+scheduler_device_groups_spec() {
+    local spec="${DEVICE_GROUPS:-}"
+    printf '%s' "${spec//[[:space:]]/}"
+}
+
+# Reject a malformed or overlapping declaration instead of silently planning
+# against a partition that does not describe the hardware.
+scheduler_device_groups_valid() {
+    local spec="${1//[[:space:]]/}" group id
+    local -a groups ids
+    local -A seen=()
+    [[ -n "$spec" ]] || return 0
+    IFS=';' read -ra groups <<< "$spec"
+    for group in "${groups[@]}"; do
+        [[ "$group" =~ ^[0-9]+(,[0-9]+)*$ ]] || return 1
+        IFS=',' read -ra ids <<< "$group"
+        for id in "${ids[@]}"; do
+            [[ -z "${seen[$id]:-}" ]] || return 1
+            seen["$id"]=1
+        done
+    done
+    return 0
+}
+
+scheduler_load_device_groups() {
+    local spec group id index=0
+    local -a groups ids
+    spec="$(scheduler_device_groups_spec)"
+    if (( SCHEDULER_GROUPS_LOADED )) && [[ "$spec" == "$SCHEDULER_GROUPS_LOADED_SPEC" ]]; then
+        return 0
+    fi
+    SCHEDULER_GROUP_OF=()
+    SCHEDULER_GROUPS_LOADED=1
+    SCHEDULER_GROUPS_LOADED_SPEC="$spec"
+    [[ -n "$spec" ]] || return 0
+    IFS=';' read -ra groups <<< "$spec"
+    for group in "${groups[@]}"; do
+        [[ -n "$group" ]] || continue
+        IFS=',' read -ra ids <<< "$group"
+        for id in "${ids[@]}"; do
+            [[ -n "$id" ]] && SCHEDULER_GROUP_OF["$id"]="$index"
+        done
+        index=$((index + 1))
+    done
+}
+
+# A card outside every declared group shares a plane with nothing else, so it
+# gets a private identity and can only ever satisfy a single-card request.
+scheduler_group_of() {
+    local id="$1"
+    scheduler_load_device_groups
+    if [[ -n "${SCHEDULER_GROUP_OF[$id]:-}" ]]; then
+        printf 'g%s' "${SCHEDULER_GROUP_OF[$id]}"
+    else
+        printf 'solo%s' "$id"
+    fi
+}
+
+scheduler_group_affinity_active() {
+    [[ "${SCHEDULER_TASK_GROUP_AFFINITY:-0}" == 1 && -n "$(scheduler_device_groups_spec)" ]]
+}
+
+scheduler_devices_same_group() {
+    local devices="$1" id group first=""
+    local -a ids
+    IFS=',' read -ra ids <<< "$devices"
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        group="$(scheduler_group_of "$id")"
+        if [[ -z "$first" ]]; then
+            first="$group"
+        elif [[ "$group" != "$first" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Largest number of cards one group contributes to the list. Under affinity this
+# -- not the pool size -- bounds what a multi-card request can ever be given.
+scheduler_max_group_size() {
+    local list="$1" id group max=0
+    local -a ids
+    local -A tally=()
+    scheduler_load_device_groups
+    IFS=',' read -ra ids <<< "$list"
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        group="$(scheduler_group_of "$id")"
+        tally["$group"]=$(( ${tally[$group]:-0} + 1 ))
+        (( tally[$group] > max )) && max=${tally[$group]}
+    done
+    printf '%s' "$max"
+}
+
+scheduler_task_group_affinity() {
+    local value
+    value=$(read_field DEVICE_GROUP_AFFINITY "$1" || true)
+    case "$value" in
+        1|true|TRUE|yes|YES|on|ON) printf 1 ;;
+        *) printf 0 ;;
+    esac
+}
+
 scheduler_pool_capacity() {
     local effective
     effective=$(scheduler_effective_pool "${1:-}")
+    if scheduler_group_affinity_active; then
+        scheduler_max_group_size "$effective"
+        return
+    fi
     device_request_count "$effective"
 }
 
@@ -112,12 +238,45 @@ scheduler_devices_subset() {
 # reservation pool. The result is concrete and suitable for scheduler_plan_start.
 scheduler_find_free_devices() {
     local need="$1" pool="${2:-}" excluded="${3:-}"
-    local effective id joined
+    local affinity="${4:-${SCHEDULER_TASK_GROUP_AFFINITY:-0}}"
+    local effective id joined group
     local wrapped=",$excluded,"
     local -a candidates selected=()
     (( need > 0 )) || return 1
     effective=$(scheduler_effective_pool "$pool")
     IFS=',' read -ra candidates <<< "$effective"
+
+    # Under affinity a multi-card request is satisfied from one group or not at
+    # all: bin the free cards by group in pool order and take the first group
+    # that can cover the request. Another group being partly free never leaks a
+    # cross-plane allocation; the task simply waits.
+    if [[ "$affinity" == 1 ]] && (( need > 1 )) && [[ -n "$(scheduler_device_groups_spec)" ]]; then
+        local -a group_order=()
+        local -A free_in_group=()
+        scheduler_load_device_groups
+        for id in "${candidates[@]}"; do
+            [[ -n "$id" ]] || continue
+            [[ "$wrapped" == *",$id,"* ]] && continue
+            any_device_in_use "$id" && continue
+            group="$(scheduler_group_of "$id")"
+            if [[ -z "${free_in_group[$group]:-}" ]]; then
+                group_order+=("$group")
+                free_in_group["$group"]="$id"
+            else
+                free_in_group["$group"]="${free_in_group[$group]},$id"
+            fi
+        done
+        for group in "${group_order[@]}"; do
+            IFS=',' read -ra selected <<< "${free_in_group[$group]}"
+            if (( ${#selected[@]} >= need )); then
+                joined=$(IFS=,; echo "${selected[*]:0:need}")
+                printf '%s' "$joined"
+                return 0
+            fi
+        done
+        return 1
+    fi
+
     for id in "${candidates[@]}"; do
         [[ -n "$id" ]] || continue
         [[ "$wrapped" == *",$id,"* ]] && continue
@@ -138,7 +297,7 @@ scheduler_find_free_devices() {
 scheduler_start_planned_task() {
     local task_file="$1" task_id="$2" pending_request="$3"
     local pending_device_count="$4" device_pool="$5" assigned="$6"
-    local current_request current_pool effective assigned_count
+    local current_request current_pool current_affinity effective assigned_count
     local -a assigned_ids=()
 
     if [[ "$task_file" != "$PENDING_DIR/$task_id" || "$(basename "$task_file")" != "$task_id" ||
@@ -149,7 +308,9 @@ scheduler_start_planned_task() {
 
     current_request=$(read_field DEVICE "$task_file" || true)
     current_pool=$(read_field DEVICE_POOL "$task_file" || true)
-    if [[ "$current_request" != "$pending_request" || "$current_pool" != "$device_pool" ]]; then
+    current_affinity=$(scheduler_task_group_affinity "$task_file")
+    if [[ "$current_request" != "$pending_request" || "$current_pool" != "$device_pool" ||
+          "$current_affinity" != "${SCHEDULER_TASK_GROUP_AFFINITY:-0}" ]]; then
         log "scheduler reject $task_id: task device metadata changed during planning"
         return 1
     fi
@@ -200,6 +361,17 @@ scheduler_start_planned_task() {
         return 1
     fi
 
+    # Last line of defence for the plane invariant. task-submit already refuses
+    # a cross-group request, and allocation above never builds one, but a
+    # cross-plane start wedges cards irrecoverably, so it is checked again here
+    # against the devices actually about to be locked.
+    if [[ -n "$assigned" && "$assigned" != none ]] && scheduler_group_affinity_active &&
+       (( $(device_request_count "$assigned") > 1 )) &&
+       ! scheduler_devices_same_group "$assigned"; then
+        log "scheduler reject $task_id: allocation '$assigned' spans device groups [$(scheduler_device_groups_spec)]"
+        return 1
+    fi
+
     start_pending_task "$task_file" "$task_id" "$assigned" "$pending_device_count"
 }
 
@@ -227,6 +399,9 @@ scheduler_schedule_tick() {
         pending_request=$(read_field DEVICE "$task_file" || true)
         pending_device_count=$(device_request_count "$pending_request")
         device_pool=$(read_field DEVICE_POOL "$task_file" || true)
+        # Part of the per-task snapshot the policy sees; the core consumes it in
+        # allocation and validation so policies cannot opt out of the invariant.
+        SCHEDULER_TASK_GROUP_AFFINITY=$(scheduler_task_group_affinity "$task_file")
 
         # This is a host admission invariant, not a policy choice. Keeping it in
         # core prevents future schedulers from accidentally bypassing the cap.
@@ -266,6 +441,8 @@ scheduler_schedule_tick() {
                 ;;
         esac
     done
+
+    SCHEDULER_TASK_GROUP_AFFINITY=0
 
     if declare -F scheduler_end_tick >/dev/null && ! scheduler_end_tick; then
         log "scheduler error: $SCHEDULER_MODE failed to end tick"

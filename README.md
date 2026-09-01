@@ -108,7 +108,21 @@ duplicate device IDs, sequence-size mismatches, and blacklist violations are
 reported at the configuration source instead of being included in a computed
 candidate pool. Submitted task metadata preserves the original project
 whitelist/blacklist, environment pool, and `--ignore-whitelist` state through
-completion for later diagnosis. Runtime
+completion for later diagnosis.
+
+Hosts whose cards are split across HCCS planes declare the partition once in
+`config/taskqueue.conf` as `DEVICE_GROUPS`, for example `"0,1;2,3"`. A project
+sets `DEVICE_GROUP_AFFINITY=1` in its `task-submit.conf` to require that all of
+a task's cards come from one group. `--device auto --device-num N` then waits
+for a single group with `N` free cards instead of being handed a cross-plane
+pair, and an explicit `--device` list or `DEVICE_SEQ_N` sequence that spans
+groups is refused at submission with the groups named. `task-submit --devices
+status` shows the topology and the largest number of cards a single request can
+receive. An unset `DEVICE_GROUPS` means the topology is unknown rather than
+fully connected, so an opted-in project's multi-card requests are refused until
+the host declares its groups; a genuinely single-plane host declares one
+all-inclusive group. `--ignore-group-affinity` turns the constraint off for
+loads that do work across planes. Runtime
 `state/available_devices` overrides configured `AVAILABLE_DEVICES`, which in
 turn overrides device detection.
 `--ptoas VERSION` validates `PTOAS_BASE/VERSION`, sets `PTOAS_ROOT`, and

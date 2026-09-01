@@ -30,6 +30,9 @@ LOGS_DIR=""
 SUBMITTER_PTOAS_BASE="${PTOAS_BASE:-}"
 unset PTOAS_BASE
 PTOAS_BASE="/usr/local/ptoas"
+# HCCS plane topology is host truth owned by the root-installed config. Drop any
+# inherited value so a submitter cannot present a fake partition to the checks.
+unset DEVICE_GROUPS
 if [ -f "$CONF_FILE" ]; then
     source "$CONF_FILE"
 fi
@@ -86,6 +89,25 @@ CONF_WHITELIST=""
 CONF_BLACKLIST=""
 CONF_WHITELIST_RAW=""
 CONF_BLACKLIST_RAW=""
+
+# 同 HCCS plane（卡组）约束
+# DEVICE_GROUPS 来自本机 taskqueue.conf，形如 "0,1;2,3"，描述哪些卡在同一个
+# 通信域；每仓 task-submit.conf 用 DEVICE_GROUP_AFFINITY=1 声明"本仓多卡必须同组"。
+# 跨 plane 的多卡通信在 pypto/simpler 上不是报错而是挂起，并把卡楔死到只能靠
+# 平台带外 reset，所以这里在提交侧就拦下，不让任务进队列。
+DEVICE_GROUPS="${DEVICE_GROUPS:-}"
+DEVICE_GROUPS="${DEVICE_GROUPS//[[:space:]]/}"
+CONF_GROUP_AFFINITY_RAW=""
+CONF_GROUP_AFFINITY=0
+GROUP_AFFINITY_EFFECTIVE=0
+declare -A DEVICE_GROUP_OF=()
+DEVICE_GROUP_MAP_LOADED=0
+# 关闭同组约束：供确实需要跨 plane 的负载（如 torch_npu 纯 HCCL collective 加
+# RoCE）放行。触发：--ignore-group-affinity 或 TASKQUEUE_IGNORE_GROUP_AFFINITY=1。
+IGNORE_GROUP_AFFINITY=0
+case "${TASKQUEUE_IGNORE_GROUP_AFFINITY:-}" in
+    1|true|TRUE|yes|YES|on|ON) IGNORE_GROUP_AFFINITY=1 ;;
+esac
 
 # 白名单超限开关：置位后 --device auto 忽略每仓 DEVICE_WHITELIST 上限，
 # 回退到全局 available_devices（黑名单 DEVICE_BLACKLIST 仍然排除）。
@@ -166,9 +188,15 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
                   序列（精确锁，等价于 --device <序列>；卡忙则排队等这几张）。
                   该序列须落在 DEVICE_WHITELIST 内，越界需加 --ignore-whitelist
   --device N      指定 NPU 卡号（N 为整数或逗号分隔多卡）
+                  若每仓配了 DEVICE_GROUP_AFFINITY=1，多卡卡号须同属一个
+                  DEVICE_GROUPS 卡组，跨组会被拒绝（见 --devices status）
   --ignore-whitelist  忽略每仓 task-submit.conf 的 DEVICE_WHITELIST 上限，
                   --device auto 回退到全局可用设备（黑名单仍排除）；
                   等价于环境变量 TASKQUEUE_IGNORE_WHITELIST=1，供 daily CI 跑多卡用例超限
+  --ignore-group-affinity  关闭同组（HCCS plane）约束，允许多卡跨组分配。
+                  仅当负载确实能跨 plane 通信时使用（如 torch_npu 纯 HCCL
+                  collective 加 RoCE）；pypto/simpler 跨组会挂起并楔死卡。
+                  等价于环境变量 TASKQUEUE_IGNORE_GROUP_AFFINITY=1
   --interactive/-i 交互模式：转发终端 stdin 到任务进程（需搭配 --run）
   --env VAR       捕获当前 shell 的环境变量（可重复使用）
   --env VAR=VAL   传递指定值的环境变量
@@ -235,6 +263,7 @@ while [[ "${1:-}" == --* || "${1:-}" == "-i" ]]; do
         --device-num) DEVICE_NUM="$2"; shift 2 ;;
         --no-device) LOCK_DEVICE=none; shift ;;
         --ignore-whitelist) IGNORE_WHITELIST=1; shift ;;
+        --ignore-group-affinity) IGNORE_GROUP_AFFINITY=1; shift ;;
         --run)       RUN_MODE=true; shift ;;
         --interactive|-i) INTERACTIVE=true; shift ;;
         --days)    CLEAN_DAYS="$2"; shift 2 ;;
@@ -527,6 +556,127 @@ load_device_conf() {
     CONF_BLACKLIST_RAW="$(read_conf_field DEVICE_BLACKLIST "$conf")"
     CONF_WHITELIST="$CONF_WHITELIST_RAW"
     CONF_BLACKLIST="$CONF_BLACKLIST_RAW"
+    CONF_GROUP_AFFINITY_RAW="$(read_conf_field DEVICE_GROUP_AFFINITY "$conf")"
+    case "$CONF_GROUP_AFFINITY_RAW" in
+        1|true|TRUE|yes|YES|on|ON) CONF_GROUP_AFFINITY=1 ;;
+        ""|0|false|FALSE|no|NO|off|OFF) CONF_GROUP_AFFINITY=0 ;;
+        *)
+            echo "${C_RED}错误: $conf 中 DEVICE_GROUP_AFFINITY 取值无效: '$CONF_GROUP_AFFINITY_RAW'${C_RESET}" >&2
+            echo "${C_DIM}应为 1/0（或 true/false、yes/no、on/off）${C_RESET}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+# --- 卡组工具（与 schedulers/_core.sh 的判定口径保持一致） ---
+
+device_groups_valid() {
+    local spec="${1//[[:space:]]/}" group id
+    local -a groups ids
+    local -A seen=()
+    [[ -n "$spec" ]] || return 0
+    IFS=';' read -ra groups <<< "$spec"
+    for group in "${groups[@]}"; do
+        [[ "$group" =~ ^[0-9]+(,[0-9]+)*$ ]] || return 1
+        IFS=',' read -ra ids <<< "$group"
+        for id in "${ids[@]}"; do
+            [[ -z "${seen[$id]:-}" ]] || return 1
+            seen["$id"]=1
+        done
+    done
+    return 0
+}
+
+load_device_group_map() {
+    (( DEVICE_GROUP_MAP_LOADED )) && return 0
+    DEVICE_GROUP_MAP_LOADED=1
+    local group id index=0
+    local -a groups ids
+    [[ -n "$DEVICE_GROUPS" ]] || return 0
+    IFS=';' read -ra groups <<< "$DEVICE_GROUPS"
+    for group in "${groups[@]}"; do
+        [[ -n "$group" ]] || continue
+        IFS=',' read -ra ids <<< "$group"
+        for id in "${ids[@]}"; do
+            [[ -n "$id" ]] && DEVICE_GROUP_OF["$id"]="$index"
+        done
+        index=$((index + 1))
+    done
+}
+
+# 未被任何卡组覆盖的卡不与其它卡共享 plane，只能满足单卡请求。
+device_group_of() {
+    local id="$1"
+    load_device_group_map
+    if [[ -n "${DEVICE_GROUP_OF[$id]:-}" ]]; then
+        printf 'g%s' "${DEVICE_GROUP_OF[$id]}"
+    else
+        printf 'solo%s' "$id"
+    fi
+}
+
+# 卡 $1 所在组的成员列表，用于错误信息里指出"它跟谁同组"。
+device_group_members() {
+    local id="$1" group members
+    group="$(device_group_of "$id")"
+    case "$group" in
+        solo*) printf '%s' "$id"; return ;;
+    esac
+    members="$(cut -d';' -f"$(( ${group#g} + 1 ))" <<< "$DEVICE_GROUPS")"
+    printf '%s' "$members"
+}
+
+device_list_same_group() {
+    local devices="$1" id group first=""
+    local -a ids
+    IFS=',' read -ra ids <<< "$devices"
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        group="$(device_group_of "$id")"
+        if [[ -z "$first" ]]; then
+            first="$group"
+        elif [[ "$group" != "$first" ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# 候选卡按组切分后每组各有几张，形如 "[0,1] (2 张)  [2,3] (2 张)"。
+format_group_breakdown() {
+    local list="$1" id group out=""
+    local -a ids order=()
+    local -A members=()
+    IFS=',' read -ra ids <<< "$list"
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        group="$(device_group_of "$id")"
+        if [[ -z "${members[$group]:-}" ]]; then
+            order+=("$group")
+            members["$group"]="$id"
+        else
+            members["$group"]="${members[$group]},$id"
+        fi
+    done
+    for group in "${order[@]}"; do
+        out+="  $(format_device_pool "${members[$group]}")"
+    done
+    printf '%s' "${out#  }"
+}
+
+# 单个卡组最多能贡献几张候选卡：同组约束下这才是多卡请求的真实上限。
+device_group_max_size() {
+    local list="$1" id group max=0
+    local -a ids
+    local -A tally=()
+    IFS=',' read -ra ids <<< "$list"
+    for id in "${ids[@]}"; do
+        [[ -n "$id" ]] || continue
+        group="$(device_group_of "$id")"
+        tally["$group"]=$(( ${tally[$group]:-0} + 1 ))
+        (( tally[$group] > max )) && max=${tally[$group]}
+    done
+    printf '%s' "$max"
 }
 
 show_device_policy_sources() {
@@ -534,7 +684,7 @@ show_device_policy_sources() {
     local base effective outside git_root seq_key seq outside_seq seq_n duplicates
     local base_valid=1
     local runtime_valid=1 config_valid=1 detected_valid=1 global_valid=1
-    local env_valid=1 whitelist_valid=1 blacklist_valid=1
+    local env_valid=1 whitelist_valid=1 blacklist_valid=1 groups_valid=0
 
     echo ""
     echo "${C_BOLD}=== Auto 设备策略来源 ===${C_RESET}"
@@ -567,6 +717,18 @@ show_device_policy_sources() {
     esac
     echo "  ${C_BOLD}全局生效池${C_RESET} $(format_device_pool "$GLOBAL_AUTO_POOL")  来源=$GLOBAL_AUTO_POOL_SOURCE"
 
+    if [[ -n "$DEVICE_GROUPS" ]]; then
+        if device_groups_valid "$DEVICE_GROUPS"; then
+            echo "  ${C_CYAN}卡组拓扑${C_RESET}   $(format_group_breakdown "$GLOBAL_AUTO_POOL")  DEVICE_GROUPS@$CONF_FILE"
+            groups_valid=1
+        else
+            echo "  ${C_CYAN}卡组拓扑${C_RESET}   $DEVICE_GROUPS  DEVICE_GROUPS@$CONF_FILE"
+            echo "    ${C_RED}INVALID${C_RESET}: 应为分号分隔的卡组、组内逗号分隔、同一张卡不得出现在两个组，如 \"0,1;2,3\""
+        fi
+    else
+        echo "  ${C_DIM}卡组拓扑${C_RESET}   未设置  DEVICE_GROUPS@$CONF_FILE（同组约束无从生效）"
+    fi
+
     if [[ -n "$ENV_DEVICE_POOL" ]]; then
         echo "  ${C_CYAN}环境卡组${C_RESET}   $(format_device_pool "$ENV_DEVICE_POOL")  TASKQUEUE_DEVICE_POOL"
         show_device_list_health "    " "TASKQUEUE_DEVICE_POOL" "$ENV_DEVICE_POOL" || env_valid=0
@@ -580,6 +742,16 @@ show_device_policy_sources() {
         show_device_list_health "      " "DEVICE_WHITELIST" "$CONF_WHITELIST_RAW" || whitelist_valid=0
         echo "    DEVICE_BLACKLIST=$(format_device_pool "$CONF_BLACKLIST_RAW")"
         show_device_list_health "      " "DEVICE_BLACKLIST" "$CONF_BLACKLIST_RAW" || blacklist_valid=0
+        echo "    DEVICE_GROUP_AFFINITY=${CONF_GROUP_AFFINITY_RAW:-未设置}"
+        if [[ "$CONF_GROUP_AFFINITY" == "1" ]]; then
+            if [[ -z "$DEVICE_GROUPS" ]]; then
+                echo "      ${C_RED}多卡被拒${C_RESET}: 本机未配置 DEVICE_GROUPS，无从判断同组；多卡任务提交即报错（单卡不受影响）"
+            elif [[ "$IGNORE_GROUP_AFFINITY" == "1" ]]; then
+                echo "      ${C_YELLOW}已放行${C_RESET}: --ignore-group-affinity/TASKQUEUE_IGNORE_GROUP_AFFINITY 关闭了同组约束"
+            else
+                echo "      ${C_GREEN}生效${C_RESET}: 多卡任务的卡必须同组，否则提交即报错"
+            fi
+        fi
         if git_root=$(git -C "$(pwd)" rev-parse --show-toplevel 2>/dev/null); then
             case "$DEVICE_CONF_PATH" in
                 "$git_root"|"$git_root"/*) ;;
@@ -613,6 +785,11 @@ show_device_policy_sources() {
         echo "  ${C_BOLD}最终 auto 候选${C_RESET} $(format_device_pool "$effective")"
         [[ -z "$outside" ]] || echo "  ${C_YELLOW}冲突${C_RESET}: 项目/环境策略中的 $(format_device_pool "$outside") 不在全局生效池，daemon 不会分配"
         [[ -n "$effective" ]] || echo "  ${C_RED}冲突${C_RESET}: 各层策略交集为空，auto 任务无法获得设备"
+        if [[ "$CONF_GROUP_AFFINITY" == "1" && "$IGNORE_GROUP_AFFINITY" != "1" &&
+              "$groups_valid" == "1" && -n "$effective" ]]; then
+            echo "  ${C_BOLD}同组候选${C_RESET}   $(format_group_breakdown "$effective")"
+            echo "  ${C_BOLD}多卡上限${C_RESET}   $(device_group_max_size "$effective") 张（单次 --device-num 的最大值；跨组不分配）"
+        fi
     else
         echo "  ${C_RED}最终 auto 候选无法计算${C_RESET}: 请先修复上面的 INVALID 设备列表"
     fi
@@ -839,6 +1016,85 @@ validate_device_count() {
     fi
 }
 
+# 同组校验：本仓 DEVICE_GROUP_AFFINITY=1 时，多卡任务的卡必须落在同一个 HCCS
+# plane 卡组内。auto 只要求"存在"一个容得下的组（选哪组交给 daemon，避免提交时
+# 就钉死一组、另一组空着也排队）；显式卡号与 DEVICE_SEQ 命中的固定序列则必须整体同组。
+# 满足不了就在提交侧报错：跨 plane 通信不会失败返回，而是挂起并把卡楔死。
+validate_device_group_affinity() {
+    GROUP_AFFINITY_EFFECTIVE=0
+    [[ "$CONF_GROUP_AFFINITY" == "1" ]] || return 0
+
+    if [[ -n "$DEVICE_GROUPS" ]] && ! device_groups_valid "$DEVICE_GROUPS"; then
+        echo "${C_RED}错误: $CONF_FILE 中 DEVICE_GROUPS 格式无效: '$DEVICE_GROUPS'${C_RESET}" >&2
+        echo "${C_DIM}应为分号分隔的卡组、组内逗号分隔、同一张卡不得出现在两个组，如 DEVICE_GROUPS=\"0,1;2,3\"${C_RESET}" >&2
+        exit 1
+    fi
+
+    # 本次请求要几张卡。单卡（及不占卡）无所谓同不同组，全程不受本约束影响。
+    local need=0
+    if is_auto_device_request; then
+        need="${DEVICE_NUM:-1}"
+        is_positive_int "$need" || need=1
+    elif [[ -n "$LOCK_DEVICE" && "$LOCK_DEVICE" != "none" &&
+            "$LOCK_DEVICE" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+        need="$(device_request_count "$LOCK_DEVICE")"
+    fi
+
+    if [[ "$IGNORE_GROUP_AFFINITY" == "1" ]]; then
+        (( need > 1 )) &&
+            echo "${C_YELLOW}警告: --ignore-group-affinity 已关闭同组约束；跨 HCCS plane 的多卡通信会挂起并楔死卡${C_RESET}" >&2
+        return 0
+    fi
+
+    # 本机没声明拓扑时对多卡 fail-closed。空值表示"拓扑未知"，不等于"所有卡同
+    # plane"——后者要管理员显式写成一个大组。猜"全连接"猜错的代价是卡被楔死到
+    # 只能等平台带外 reset，报错的代价只是一次带修复指令的提交失败；本仓既然
+    # 声明了 DEVICE_GROUP_AFFINITY=1，就是在说它的负载担不起前者。
+    if [[ -z "$DEVICE_GROUPS" ]]; then
+        (( need > 1 )) || return 0
+        echo "${C_RED}错误: 本仓要求同组借卡，但本机未声明卡组拓扑，无法保证 ${need} 张卡落在同一个 HCCS plane${C_RESET}" >&2
+        echo "${C_DIM}请在 $CONF_FILE 配置 DEVICE_GROUPS：单 plane 机器写成一个大组（如 \"0,1,2,3\"），${C_RESET}" >&2
+        echo "${C_DIM}多 plane 机器按 plane 分组（如 \"0,1;2,3\"）；空值表示拓扑未知，不等于所有卡同 plane${C_RESET}" >&2
+        echo "${C_DIM}本仓的要求来自 $DEVICE_CONF_PATH 的 DEVICE_GROUP_AFFINITY=1${C_RESET}" >&2
+        echo "${C_DIM}确认本机可跨 plane 时用 --ignore-group-affinity（或 TASKQUEUE_IGNORE_GROUP_AFFINITY=1）临时放行${C_RESET}" >&2
+        exit 1
+    fi
+    GROUP_AFFINITY_EFFECTIVE=1
+    (( need > 1 )) || return 0
+
+    local candidates largest
+    if is_auto_device_request; then
+        candidates="$(device_list_intersection "$GLOBAL_AUTO_POOL" "${DEVICE_POOL:-$GLOBAL_AUTO_POOL}")"
+        largest="$(device_group_max_size "$candidates")"
+        if (( largest < need )); then
+            echo "${C_RED}错误: 请求 ${need} 张同组卡，但候选范围内最大的卡组只有 ${largest} 张，任务无法满足${C_RESET}" >&2
+            echo "${C_DIM}本机卡组: $(format_group_breakdown "$GLOBAL_AUTO_POOL")（DEVICE_GROUPS，见 $CONF_FILE）${C_RESET}" >&2
+            echo "${C_DIM}本仓候选: $(format_group_breakdown "$candidates")${C_RESET}" >&2
+            echo "${C_DIM}$DEVICE_CONF_PATH 设了 DEVICE_GROUP_AFFINITY=1：跨 plane 通信会挂起并楔死卡，故不跨组分配${C_RESET}" >&2
+            echo "${C_DIM}请减小 --device-num，或确需跨组时加 --ignore-group-affinity（风险自负）${C_RESET}" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    if ! device_list_same_group "$LOCK_DEVICE"; then
+        local id
+        if [[ -n "$DEVICE_SEQUENCE_SOURCE" ]]; then
+            echo "${C_RED}错误: 固定序列 [$LOCK_DEVICE] 跨越了 HCCS plane 卡组，多卡通信会挂起并楔死卡${C_RESET}" >&2
+            echo "${C_DIM}来源: $DEVICE_SEQUENCE_SOURCE${C_RESET}" >&2
+        else
+            echo "${C_RED}错误: --device $LOCK_DEVICE 跨越了 HCCS plane 卡组，多卡通信会挂起并楔死卡${C_RESET}" >&2
+        fi
+        for id in ${LOCK_DEVICE//,/ }; do
+            echo "${C_DIM}  卡 $id 属于卡组 [$(device_group_members "$id")]${C_RESET}" >&2
+        done
+        echo "${C_DIM}本机卡组: $(format_group_breakdown "$GLOBAL_AUTO_POOL")（DEVICE_GROUPS，见 $CONF_FILE）${C_RESET}" >&2
+        echo "${C_DIM}请改用同组卡号，或用 --device auto --device-num ${need} 让调度器在组内选${C_RESET}" >&2
+        echo "${C_DIM}确需跨组（如 torch_npu 纯 HCCL collective 加 RoCE）请加 --ignore-group-affinity${C_RESET}" >&2
+        exit 1
+    fi
+}
+
 normalize_device_request
 DEVICE_REQUEST_RAW="$(build_device_request)"
 if is_auto_device_request; then
@@ -856,6 +1112,7 @@ apply_device_sequence
 apply_device_policy
 validate_device_pool
 validate_device_count
+validate_device_group_affinity
 
 # --interactive 必须搭配 --run（需要实时终端）
 if [[ "$INTERACTIVE" == "true" && "$RUN_MODE" != "true" ]]; then
@@ -1006,6 +1263,7 @@ DEVICE_POLICY_IGNORE_WHITELIST=$IGNORE_WHITELIST
 DEVICE_POLICY_ENV_POOL=$ENV_DEVICE_POOL
 DEVICE_GLOBAL_POOL=$GLOBAL_AUTO_POOL
 DEVICE_GLOBAL_POOL_SOURCE=$GLOBAL_AUTO_POOL_SOURCE
+DEVICE_GROUP_AFFINITY=$GROUP_AFFINITY_EFFECTIVE
 MAX_TIME=$MAX_TIME
 INTERACTIVE=$([[ "$INTERACTIVE" == "true" ]] && echo 1 || echo 0)
 EOF

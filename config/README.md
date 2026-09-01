@@ -36,6 +36,36 @@ identifier resolved to a root-managed `app/schedulers/<mode>.sh`, not an
 arbitrary path. A new repository module is installed automatically by
 `setup.sh`; `_core.sh` cannot be selected as a policy.
 
+`DEVICE_GROUPS` describes which cards share a communication domain (HCCS plane)
+on this host, as semicolon-separated groups of comma-separated card ids, for
+example `DEVICE_GROUPS="0,1;2,3"`. It is per-machine hardware truth, so it
+belongs here rather than in a repository's `task-submit.conf`, which travels to
+hosts with a different topology. A card may appear in at most one group, and a
+card left out of every group is treated as sharing a plane with nothing else, so
+it can only ever satisfy a single-card request.
+
+Empty is the default and means the topology is unknown, which is not the same as
+every card sharing one plane: a host that really is single-plane declares that
+with one all-inclusive group. A repository that has not opted in is unaffected
+by an empty value, but a repository that opted in has its multi-card requests
+refused until the host declares its groups, because guessing "fully connected"
+is wrong exactly on the multi-plane hosts the constraint exists for, and being
+wrong there costs a card until the platform resets it.
+
+A repository opts in per task with `DEVICE_GROUP_AFFINITY=1` in its
+`task-submit.conf`. Every multi-card task from that repository is then confined
+to one group: `--device auto --device-num N` is allocated from a single group
+that has `N` free cards and otherwise waits, while an explicit `--device` list
+or a `DEVICE_SEQ_N` sequence that spans groups is refused at submission. The
+scheduler core, not the selected policy, owns this rule, and it revalidates the
+devices immediately before locking them, so no policy can allocate across
+planes. `--ignore-group-affinity` (or `TASKQUEUE_IGNORE_GROUP_AFFINITY=1`) turns
+the constraint off for loads that genuinely cross planes, such as pure HCCL
+collectives with `HCCL_INTRA_ROCE_ENABLE=1`. The rule exists because pypto and
+simpler build their data plane on ACL VMM Fabric handles, which cannot be
+established across planes: the collective does not return an error, it hangs,
+and the cards stay unusable until the platform resets them out of band.
+
 `MAX_CONCURRENT_8_CARD_TASKS` defaults to `0`, which preserves the historical
 scheduler behavior. Set it to `1` only in a host's local configuration when
 that server should keep additional eight-card jobs pending without blocking

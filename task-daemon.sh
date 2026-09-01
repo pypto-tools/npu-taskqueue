@@ -88,6 +88,7 @@ parse_task_file() {
     DEVICE_POLICY_ENV_POOL=""
     DEVICE_GLOBAL_POOL=""
     DEVICE_GLOBAL_POOL_SOURCE=""
+    DEVICE_GROUP_AFFINITY=0
     MAX_TIME=300
     INTERACTIVE=0
     while IFS='=' read -r key value; do
@@ -109,6 +110,7 @@ parse_task_file() {
             DEVICE_POLICY_ENV_POOL) DEVICE_POLICY_ENV_POOL="$value" ;;
             DEVICE_GLOBAL_POOL) DEVICE_GLOBAL_POOL="$value" ;;
             DEVICE_GLOBAL_POOL_SOURCE) DEVICE_GLOBAL_POOL_SOURCE="$value" ;;
+            DEVICE_GROUP_AFFINITY) DEVICE_GROUP_AFFINITY="$value" ;;
             MAX_TIME)    MAX_TIME="$value" ;;
             INTERACTIVE) INTERACTIVE="$value" ;;
         esac
@@ -493,10 +495,17 @@ run_task() {
     # 兜底: 避免 auto / auto:N 直接传给 npu-lock
     if [[ "$DEVICE" == "auto" || "$DEVICE" == auto:* ]]; then
         local resolved_device
-        resolved_device=$(resolve_device_request "$RUNNING_DIR/$task_id" "$task_id" "$DEVICE" "$DEVICE_POOL") || {
+        # This fallback runs outside a scheduler tick, so the task's own plane
+        # affinity has to be re-established instead of inheriting whatever the
+        # previous tick left in the shared snapshot variable.
+        SCHEDULER_TASK_GROUP_AFFINITY=$(scheduler_task_group_affinity "$RUNNING_DIR/$task_id")
+        resolved_device=$(resolve_device_request "$RUNNING_DIR/$task_id" "$task_id" "$DEVICE" "$DEVICE_POOL")
+        local resolve_status=$?
+        SCHEDULER_TASK_GROUP_AFFINITY=0
+        if (( resolve_status != 0 )); then
             write_reject "$task_id" "error: failed to resolve device request '$DEVICE'"
             return 0
-        }
+        fi
         DEVICE="$resolved_device"
     fi
 
@@ -816,6 +825,16 @@ load_scheduler() {
 
 load_scheduler || exit 1
 
+# HCCS plane topology for this host, e.g. DEVICE_GROUPS="0,1;2,3". Empty keeps
+# the historical ungrouped behaviour; a repository opts in per task through
+# DEVICE_GROUP_AFFINITY in its task-submit.conf.
+DEVICE_GROUPS="${DEVICE_GROUPS:-}"
+DEVICE_GROUPS="${DEVICE_GROUPS//[[:space:]]/}"
+if ! scheduler_device_groups_valid "$DEVICE_GROUPS"; then
+    echo "error: DEVICE_GROUPS must be semicolon-separated groups of comma-separated card ids with no card in two groups, e.g. \"0,1;2,3\"" >&2
+    exit 1
+fi
+
 # must run as root (或显式允许普通用户，用于本地测试)
 if [ "$(id -u)" -ne 0 ] && [ -z "${TASKQUEUE_ALLOW_USER:-}" ]; then
     echo "error: must run as root (set TASKQUEUE_ALLOW_USER=1 to run as current user)" >&2
@@ -838,6 +857,7 @@ chmod 1777 "$FIFO_DIR" 2>/dev/null
 
 log "task-daemon started (pid=$$)"
 log "scheduler loaded: mode=$SCHEDULER_MODE api=$SCHEDULER_MODULE_API_VERSION"
+log "device groups: ${DEVICE_GROUPS:-<none>}"
 
 RUNNING=true
 cleanup() {
