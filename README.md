@@ -43,7 +43,7 @@ The default installation is:
 ```text
 /home/pypto-tools/pto-task/
 ├── app/       # deployed programs and root-managed scheduler modules
-├── config/    # local taskqueue.conf; never overwritten by an update
+├── config/    # local taskqueue.conf and pypto-env.conf; never overwritten
 ├── state/     # pending, running, done, locks, FIFO, usage and daemon state
 ├── update/    # repository-controlled rollout sequence and staging markers
 ├── logs/      # task and daemon logs
@@ -65,7 +65,8 @@ default tools root. Use `setup.sh` instead when only copying files and installin
 system integration without starting or restarting the main daemon is desired.
 
 `/usr/local/bin/task-submit` and `/usr/local/bin/pto-task` are symbolic links
-to the same `<tools-root>/pto-task/app/task-submit` program. No
+to the same `<tools-root>/pto-task/app/task-submit` program. The installer also
+links `/usr/local/bin/pypto-setup` to the environment helper in `app/`. No
 `npu-lock` or daemon command alias is installed in `/usr/local/bin`.
 
 The one-command deployment manages the systemd service. For diagnostics, the
@@ -97,6 +98,23 @@ task-submit --kill <task-id>
 pto-task --stats --days 7
 task-submit --devices status
 ```
+
+`pypto-setup` reports the configured locations of shared pypto development
+components and whether each path exists. To load those paths into the current
+shell, use:
+
+```bash
+pypto-setup
+eval "$(pypto-setup --export)"
+```
+
+The host configuration is
+`<tools-root>/pto-task/config/pypto-env.conf`. It is created on first install
+and preserved on updates. Existing exported variables take precedence, and a
+user may override the host defaults in `~/.config/pypto-env.conf` without root
+access. `PTOAS_ROOT`, `ASCEND_HOME_PATH`, `GCC15_ROOT`, `CLANG_FORMAT`, and
+`MODELS_ROOT` are supported; `GCC15_ROOT` is optional and unset by default.
+Legacy root-owned `/etc/pypto-env.conf` is imported on first install when safe.
 
 `--max-time` defaults to 300 seconds; `--timeout` defaults to 600 seconds and
 only controls client waiting. Project-local `task-submit.conf` device policies

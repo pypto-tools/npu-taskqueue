@@ -6,6 +6,11 @@ The installer creates this file automatically when it is missing:
 /home/pypto-tools/pto-task/config/taskqueue.conf
 ```
 
+It also creates `pypto-env.conf` in the same directory. That file configures
+the paths reported and exported by `pypto-setup`; like `taskqueue.conf`, it is
+host-local and preserved across updates. Users can override it with exported
+environment variables or `~/.config/pypto-env.conf`.
+
 It is local machine configuration and is never copied or overwritten during an
 update. Set `MAX_CONCURRENT`, `MAX_TIME_HARD_CAP`, `KILL_GRACE`, and
 `AVAILABLE_DEVICES` there. `TASK_EXECUTION_MODE` defaults to `HwHiAiUser`: a

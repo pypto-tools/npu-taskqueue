@@ -102,7 +102,9 @@ TMP_DIR="$TOOL_ROOT/tmp"
 UPDATE_DIR="$TOOL_ROOT/update"
 CONFIG_FILE="$CONFIG_DIR/taskqueue.conf"
 REPO_UPDATE_CONFIG="$CONFIG_DIR/repo-auto-update.env"
+PYPTO_CONFIG_FILE="$CONFIG_DIR/pypto-env.conf"
 LEGACY_CONFIG_FILE="/etc/taskqueue.conf"
+LEGACY_PYPTO_CONFIG_FILE="/etc/pypto-env.conf"
 
 # Read the simple KEY=value format used by the former /etc/taskqueue.conf
 # without sourcing shell code as root.
@@ -444,6 +446,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
         "$REPO_UPDATE_MODULE_DIR" "$CONFIG_DIR" "$LOGS_DIR" "$TMP_DIR" "$UPDATE_DIR"
 fi
 install_app_file "$SCRIPT_DIR/task-submit.sh" "$APP_DIR/task-submit" 755
+install_app_file "$SCRIPT_DIR/pypto-setup.sh" "$APP_DIR/pypto-setup" 755
 # Install the shared core first, then policies, and replace the daemon last.
 # Policy modules retain an API-v1 upgrade bridge, so every intermediate state
 # remains restartable if a file-by-file installation is interrupted.
@@ -505,6 +508,24 @@ if [[ ! -e "$REPO_UPDATE_CONFIG" ]]; then
     write_app_file "$REPO_UPDATE_CONFIG" 644 "$rendered_repo_update_config"$'\n'
 fi
 
+if [[ "$INIT_CONFIG" == true && ! -e "$PYPTO_CONFIG_FILE" ]]; then
+    pypto_config_source="$SCRIPT_DIR/config/pypto-env.conf"
+    if [[ "$(id -u)" -eq 0 && -e "$LEGACY_PYPTO_CONFIG_FILE" ]]; then
+        if [[ -f "$LEGACY_PYPTO_CONFIG_FILE" && ! -L "$LEGACY_PYPTO_CONFIG_FILE" &&
+              "$(stat -c %u "$LEGACY_PYPTO_CONFIG_FILE")" -eq 0 &&
+              "$(stat -c %h "$LEGACY_PYPTO_CONFIG_FILE")" -eq 1 &&
+              $((8#$(stat -c %a "$LEGACY_PYPTO_CONFIG_FILE") & 8#022)) -eq 0 ]]; then
+            pypto_config_source="$LEGACY_PYPTO_CONFIG_FILE"
+            printf 'Importing legacy pypto environment config from: %s\n' \
+                "$LEGACY_PYPTO_CONFIG_FILE"
+        else
+            printf 'Warning: ignored unsafe legacy configuration: %s\n' \
+                "$LEGACY_PYPTO_CONFIG_FILE" >&2
+        fi
+    fi
+    install_app_file "$pypto_config_source" "$PYPTO_CONFIG_FILE" 644
+fi
+
 if [[ "$INIT_CONFIG" == true && ! -e "$CONFIG_FILE" ]]; then
     initial_state_dir="$STATE_DIR"
     initial_logs_dir="$LOGS_DIR"
@@ -561,6 +582,15 @@ if [[ "$(id -u)" -eq 0 && -e "$REPO_UPDATE_CONFIG" ]]; then
     }
     chown root:root "$REPO_UPDATE_CONFIG"
     chmod go-w "$REPO_UPDATE_CONFIG"
+fi
+if [[ "$(id -u)" -eq 0 && -e "$PYPTO_CONFIG_FILE" ]]; then
+    [[ ! -L "$PYPTO_CONFIG_FILE" && -f "$PYPTO_CONFIG_FILE" &&
+       "$(stat -c %h "$PYPTO_CONFIG_FILE")" -eq 1 ]] || {
+        echo "error: unsafe pypto environment configuration: $PYPTO_CONFIG_FILE" >&2
+        exit 1
+    }
+    chown root:root "$PYPTO_CONFIG_FILE"
+    chmod go-w "$PYPTO_CONFIG_FILE"
 fi
 
 if [[ -f "$CONFIG_FILE" ]]; then
@@ -637,6 +667,7 @@ write_app_file "$APP_DIR/pto-task-auto-update.timer" 644 \
 ensure_dir 755 "$BIN_DIR"
 ln -sfn "$APP_DIR/task-submit" "$BIN_DIR/task-submit"
 ln -sfn "$APP_DIR/task-submit" "$BIN_DIR/pto-task"
+ln -sfn "$APP_DIR/pypto-setup" "$BIN_DIR/pypto-setup"
 
 # Remove only retired auxiliary aliases. task-submit remains a supported user
 # command for compatibility, alongside pto-task.
@@ -646,6 +677,7 @@ done
 
 printf 'Installed application: %s\n' "$APP_DIR"
 printf 'User commands: %s/task-submit and %s/pto-task -> %s/task-submit\n' "$BIN_DIR" "$BIN_DIR" "$APP_DIR"
+printf 'Environment command: %s/pypto-setup -> %s/pypto-setup\n' "$BIN_DIR" "$APP_DIR"
 if [[ -f "$CONFIG_FILE" ]]; then
     printf 'Configuration: %s (preserved)\n' "$CONFIG_FILE"
 else

@@ -13,16 +13,27 @@ TOOLS_ROOT="$TEST_ROOT/tools"
 BIN_DIR="$TEST_ROOT/bin"
 SBIN_DIR="$TEST_ROOT/sbin"
 mkdir -p "$BIN_DIR" "$SBIN_DIR"
-touch "$BIN_DIR/task-submit" "$BIN_DIR/npu-lock" "$BIN_DIR/pto-taskqueue" "$SBIN_DIR/task-daemon"
+touch "$BIN_DIR/task-submit" "$BIN_DIR/pypto-setup" "$BIN_DIR/npu-lock" \
+    "$BIN_DIR/pto-taskqueue" "$SBIN_DIR/task-daemon"
 
 bash "$REPO_DIR/setup.sh" --tools-root "$TOOLS_ROOT" --bin-dir "$BIN_DIR" --sbin-dir "$SBIN_DIR"
 INSTALL_ROOT="$TOOLS_ROOT/pto-task"
 
-[[ -L "$BIN_DIR/task-submit" && -L "$BIN_DIR/pto-task" ]]
+[[ -L "$BIN_DIR/task-submit" && -L "$BIN_DIR/pto-task" && -L "$BIN_DIR/pypto-setup" ]]
 [[ ! -e "$BIN_DIR/npu-lock" && ! -e "$BIN_DIR/pto-taskqueue" && ! -e "$SBIN_DIR/task-daemon" ]]
 [[ "$(readlink -f "$BIN_DIR/task-submit")" == "$INSTALL_ROOT/app/task-submit" ]]
 [[ "$(readlink -f "$BIN_DIR/pto-task")" == "$INSTALL_ROOT/app/task-submit" ]]
+[[ "$(readlink -f "$BIN_DIR/pypto-setup")" == "$INSTALL_ROOT/app/pypto-setup" ]]
 [[ -x "$INSTALL_ROOT/app/task-submit" ]]
+[[ -x "$INSTALL_ROOT/app/pypto-setup" ]]
+[[ -f "$INSTALL_ROOT/config/pypto-env.conf" ]]
+grep -Fqx 'ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}"' \
+    "$INSTALL_ROOT/config/pypto-env.conf"
+grep -Fqx 'GCC15_ROOT="${GCC15_ROOT:-}"' "$INSTALL_ROOT/config/pypto-env.conf"
+installed_pypto_exports="$(env -u PTOAS_ROOT -u ASCEND_HOME_PATH -u GCC15_ROOT \
+    -u CLANG_FORMAT -u MODELS_ROOT "$BIN_DIR/pypto-setup" --export)"
+grep -Fq 'export ASCEND_HOME_PATH=/usr/local/Ascend/cann' <<< "$installed_pypto_exports"
+grep -Fq "export GCC15_ROOT=''" <<< "$installed_pypto_exports"
 [[ -f "$INSTALL_ROOT/app/schedulers/_core.sh" ]]
 [[ -f "$INSTALL_ROOT/app/schedulers/backfill.sh" ]]
 [[ -f "$INSTALL_ROOT/app/schedulers/pool_aware_reservation.sh" ]]
@@ -109,12 +120,13 @@ if [[ "$(id -u)" -eq 0 ]]; then
     [[ -z "$(find "$INSTALL_ROOT/app" -maxdepth 1 -type f ! -user root -print -quit)" ]]
     [[ -z "$(find "$INSTALL_ROOT/app/schedulers" -maxdepth 1 -type f ! -user root -print -quit)" ]]
     [[ "$(stat -c '%U:%G' "$INSTALL_ROOT/config/taskqueue.conf")" == root:root ]]
+    [[ "$(stat -c '%U:%G' "$INSTALL_ROOT/config/pypto-env.conf")" == root:root ]]
 
     leaf_target="$TEST_ROOT/managed-leaf-target"
     leaf_directory_target="$TEST_ROOT/managed-leaf-directory-target"
     printf 'unchanged\n' > "$leaf_target"
     mkdir -p "$leaf_directory_target"
-    for managed_leaf in pto-task.service \
+    for managed_leaf in pypto-setup pto-task.service \
         .pto-task-install-options .pto-task-restart-required; do
         rm -f "$INSTALL_ROOT/app/$managed_leaf"
         ln -s "$leaf_target" "$INSTALL_ROOT/app/$managed_leaf"
@@ -125,7 +137,7 @@ if [[ "$(id -u)" -eq 0 ]]; then
         --sbin-dir "$SBIN_DIR" >/dev/null
     [[ "$(<"$leaf_target")" == unchanged ]]
     [[ -z "$(find "$leaf_directory_target" -mindepth 1 -print -quit)" ]]
-    for managed_leaf in pto-task.service \
+    for managed_leaf in pypto-setup pto-task.service \
         .pto-task-install-options .pto-task-restart-required .pto-task-release; do
         [[ -f "$INSTALL_ROOT/app/$managed_leaf" && ! -L "$INSTALL_ROOT/app/$managed_leaf" ]]
         [[ "$(stat -c '%U:%G' "$INSTALL_ROOT/app/$managed_leaf")" == root:root ]]
@@ -223,6 +235,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 printf 'MAX_CONCURRENT=23\n' >> "$INSTALL_ROOT/config/taskqueue.conf"
+printf 'MODELS_ROOT=/srv/shared-models\n' >> "$INSTALL_ROOT/config/pypto-env.conf"
 mkdir -p "$INSTALL_ROOT/state/pending"
 printf 'keep\n' > "$INSTALL_ROOT/state/pending/sentinel"
 # Re-deployment repairs historical shared-directory and lock-file modes.
@@ -231,6 +244,7 @@ install -m 600 /dev/null "$INSTALL_ROOT/state/locks/npu_device_30.lock"
 historical_lock_inode="$(stat -c '%d:%i' "$INSTALL_ROOT/state/locks/npu_device_30.lock")"
 bash "$REPO_DIR/setup.sh" --tools-root "$TOOLS_ROOT" --bin-dir "$BIN_DIR" --sbin-dir "$SBIN_DIR"
 grep -qx 'MAX_CONCURRENT=23' "$INSTALL_ROOT/config/taskqueue.conf"
+grep -qx 'MODELS_ROOT=/srv/shared-models' "$INSTALL_ROOT/config/pypto-env.conf"
 [[ "$(<"$INSTALL_ROOT/state/pending/sentinel")" == keep ]]
 [[ "$(stat -c %a "$INSTALL_ROOT/state/locks")" == 1777 ]]
 [[ "$(stat -c %a "$INSTALL_ROOT/state/locks/npu_device_30.lock")" == 666 ]]

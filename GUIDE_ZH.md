@@ -22,7 +22,7 @@ sudo bash deploy.sh
 ```text
 /home/pypto-tools/pto-task/
 ├── app/
-├── config/
+├── config/                 # taskqueue.conf、pypto-env.conf
 ├── state/{pending,running,done,locks,kill,fifo,usage}/
 ├── logs/
 └── tmp/
@@ -33,6 +33,19 @@ sudo bash deploy.sh
 `root:root` 持有；共享目录为 `1777`，设备锁为 `0666`，所以所有用户都能使用，
 也不需要普通用户修改锁权限。部署会按照最终卡列表预先创建每张卡的持久锁文件，
 后续任务只打开并复用同一个锁，不再由首个用户创建。
+
+部署还会安装 `pypto-setup`，用于查看或载入 pypto 公共组件路径：
+
+```bash
+pypto-setup
+eval "$(pypto-setup --export)"
+```
+
+主机公共配置位于 `<tools-root>/pto-task/config/pypto-env.conf`，首次部署时创建，
+后续升级不会覆盖。已经导出的同名环境变量优先；普通用户也可通过
+`~/.config/pypto-env.conf` 覆盖主机默认值。支持 `PTOAS_ROOT`、
+`ASCEND_HOME_PATH`、`GCC15_ROOT`、`CLANG_FORMAT` 和 `MODELS_ROOT`；其中
+`GCC15_ROOT` 默认留空，仅在服务器确实安装了共用 GCC 15 时配置。
 
 常用配置可以直接随部署命令传入，不必手改配置文件：
 
