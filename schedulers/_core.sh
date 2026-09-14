@@ -156,6 +156,19 @@ scheduler_group_of() {
     fi
 }
 
+# Non-forking companion to scheduler_group_of. Allocation classifies every free
+# card of every pending task on every poll, so the command substitution that
+# scheduler_group_of needs is not affordable there.
+SCHEDULER_GROUP_KEY=""
+scheduler_set_group_key() {
+    scheduler_load_device_groups
+    if [[ -n "${SCHEDULER_GROUP_OF[$1]:-}" ]]; then
+        SCHEDULER_GROUP_KEY="g${SCHEDULER_GROUP_OF[$1]}"
+    else
+        SCHEDULER_GROUP_KEY="solo$1"
+    fi
+}
+
 scheduler_group_affinity_active() {
     [[ "${SCHEDULER_TASK_GROUP_AFFINITY:-0}" == 1 && -n "$(scheduler_device_groups_spec)" ]]
 }
@@ -236,56 +249,83 @@ scheduler_devices_subset() {
 
 # Allocate an auto request from its effective pool while optionally excluding a
 # reservation pool. The result is concrete and suitable for scheduler_plan_start.
+#
+# Cards are taken from the most fragmented group first. A group that is still
+# whole is the only thing that can ever satisfy a large affinity request, so
+# spending one on a request that a partly used group could have absorbed costs
+# the host that capability until the cards come back, while the reverse costs
+# nothing. Ranking is stable, so where DEVICE_GROUPS is unset -- every card its
+# own solo group, every group equally fragmented -- allocation order is exactly
+# the pool order it has always been.
 scheduler_find_free_devices() {
     local need="$1" pool="${2:-}" excluded="${3:-}"
     local affinity="${4:-${SCHEDULER_TASK_GROUP_AFFINITY:-0}}"
-    local effective id joined group
+    local effective id joined group pos group_count prev_count
     local wrapped=",$excluded,"
-    local -a candidates selected=()
+    local -a candidates group_free selected=()
+    local -a group_order=() ranked=()
+    local -A free_in_group=() free_count=()
     (( need > 0 )) || return 1
     effective=$(scheduler_effective_pool "$pool")
     IFS=',' read -ra candidates <<< "$effective"
 
-    # Under affinity a multi-card request is satisfied from one group or not at
-    # all: bin the free cards by group in pool order and take the first group
-    # that can cover the request. Another group being partly free never leaks a
-    # cross-plane allocation; the task simply waits.
-    if [[ "$affinity" == 1 ]] && (( need > 1 )) && [[ -n "$(scheduler_device_groups_spec)" ]]; then
-        local -a group_order=()
-        local -A free_in_group=()
-        scheduler_load_device_groups
-        for id in "${candidates[@]}"; do
-            [[ -n "$id" ]] || continue
-            [[ "$wrapped" == *",$id,"* ]] && continue
-            any_device_in_use "$id" && continue
-            group="$(scheduler_group_of "$id")"
-            if [[ -z "${free_in_group[$group]:-}" ]]; then
-                group_order+=("$group")
-                free_in_group["$group"]="$id"
-            else
-                free_in_group["$group"]="${free_in_group[$group]},$id"
-            fi
+    # Bin the free cards by group, keeping first-seen group order and pool order
+    # within a group so equally fragmented groups keep their historical rank.
+    for id in "${candidates[@]}"; do
+        [[ -n "$id" ]] || continue
+        [[ "$wrapped" == *",$id,"* ]] && continue
+        any_device_in_use "$id" && continue
+        scheduler_set_group_key "$id"
+        group="$SCHEDULER_GROUP_KEY"
+        if [[ -z "${free_in_group[$group]:-}" ]]; then
+            group_order+=("$group")
+            free_in_group["$group"]="$id"
+        else
+            free_in_group["$group"]="${free_in_group[$group]},$id"
+        fi
+        free_count["$group"]=$(( ${free_count[$group]:-0} + 1 ))
+    done
+
+    # Insertion sort by ascending free count over a handful of groups. Shifting
+    # only on a strict inequality keeps it stable, so ties fall back to pool
+    # order and an ungrouped host sees no change at all.
+    for group in "${group_order[@]}"; do
+        group_count=${free_count[$group]}
+        pos=${#ranked[@]}
+        while (( pos > 0 )); do
+            prev_count=${free_count[${ranked[$((pos - 1))]}]}
+            (( prev_count > group_count )) || break
+            ranked[$pos]="${ranked[$((pos - 1))]}"
+            pos=$((pos - 1))
         done
-        for group in "${group_order[@]}"; do
+        ranked[$pos]="$group"
+    done
+
+    # Under affinity a multi-card request is satisfied from one group or not at
+    # all. The first group in rank order that covers it is the smallest one that
+    # can, which leaves the wider planes intact. Another group being partly free
+    # never leaks a cross-plane allocation; the task simply waits.
+    if [[ "$affinity" == 1 ]] && (( need > 1 )) && [[ -n "$(scheduler_device_groups_spec)" ]]; then
+        for group in "${ranked[@]}"; do
+            (( ${free_count[$group]} >= need )) || continue
             IFS=',' read -ra selected <<< "${free_in_group[$group]}"
-            if (( ${#selected[@]} >= need )); then
-                joined=$(IFS=,; echo "${selected[*]:0:need}")
-                printf '%s' "$joined"
-                return 0
-            fi
+            joined=$(IFS=,; echo "${selected[*]:0:need}")
+            printf '%s' "$joined"
+            return 0
         done
         return 1
     fi
 
-    for id in "${candidates[@]}"; do
-        [[ -n "$id" ]] || continue
-        [[ "$wrapped" == *",$id,"* ]] && continue
-        any_device_in_use "$id" || selected+=("$id")
-        if (( ${#selected[@]} >= need )); then
-            joined=$(IFS=,; echo "${selected[*]}")
-            printf '%s' "$joined"
-            return 0
-        fi
+    for group in "${ranked[@]}"; do
+        IFS=',' read -ra group_free <<< "${free_in_group[$group]}"
+        for id in "${group_free[@]}"; do
+            selected+=("$id")
+            if (( ${#selected[@]} >= need )); then
+                joined=$(IFS=,; echo "${selected[*]}")
+                printf '%s' "$joined"
+                return 0
+            fi
+        done
     done
     return 1
 }

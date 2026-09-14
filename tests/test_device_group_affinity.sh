@@ -149,6 +149,27 @@ IN_USE_SET=",0,1,2,"
 SCHEDULER_TASK_GROUP_AFFINITY=1
 assert_eq "3" "$(scheduler_find_free_devices 1 '' '')" "single card ignores affinity"
 
+# Allocation spends the most fragmented group first. Card 2 is busy, so g1 has
+# a single card left while g0 is still whole: a one-card request takes the
+# leftover rather than shattering the plane that a two-card job still needs.
+reset_runtime
+IN_USE_SET=",2,"
+SCHEDULER_TASK_GROUP_AFFINITY=0
+assert_eq "3" "$(scheduler_find_free_devices 1 '' '')" "single card takes the fragmented group"
+SCHEDULER_TASK_GROUP_AFFINITY=1
+assert_eq "0,1" "$(scheduler_find_free_devices 2 '' '')" "the whole plane stayed available"
+
+# With every card free, an affinity request goes to the smallest group that can
+# hold it, so the wider plane stays intact for requests only it can serve.
+reset_runtime
+DEVICE_GROUPS="0,1,2,3;4,5"
+AVAILABLE_DEVICES="0,1,2,3,4,5"
+SCHEDULER_TASK_GROUP_AFFINITY=1
+assert_eq "4,5" "$(scheduler_find_free_devices 2 '' '')" "two cards take the smaller group"
+assert_eq "0,1,2" "$(scheduler_find_free_devices 3 '' '')" "three cards fall back to the only group that fits"
+DEVICE_GROUPS="0,1;2,3"
+AVAILABLE_DEVICES="0,1,2,3"
+
 # Capacity under affinity is the largest group, not the pool size. The
 # reservation policy uses this to tell "waiting for cards" from "never runnable".
 reset_runtime
