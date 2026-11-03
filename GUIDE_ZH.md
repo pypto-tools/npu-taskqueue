@@ -279,3 +279,18 @@ task-submit --clean --days 7        # 清理 7 天前完成的任务
    匹配，所以正常命令里带上这些词也会被拒，改个写法即可。
 7. **交互式任务用 `-i`**，必须搭配 `--run` 且需要真实终端。只支持按行输入，
    断开后无法重连 stdin（日志仍可用 `--wait` 继续看）。
+
+### 服务器重启与任务恢复
+
+队列服务由 systemd 开机启动。daemon 使用持有整个生命周期的 `flock` 独占锁，
+`state/task-daemon.pid` 仅用于查询，旧 PID 被复用不会阻止启动。
+不要在运行期间删除或替换 `state/task-daemon.lock`；该文件不放在用户共享的 `locks/` 中。
+任务监管进程及任务本身不继承 daemon 的锁。
+
+Running 任务在领取时由 daemon 写入系统 `BOOT_ID`。启动时，属于上次开机的记录
+转为 Done（`EXIT_CODE=137`、`INTERRUPT_REASON=server-reboot`），保留日志，
+清理关联临时文件；不会重跑、不会放回 Pending，也不会向旧 PID 发信号。
+旧版无 `BOOT_ID` 的记录按开始时间判断，缺少开始时间时用记录修改时间；该兼容
+判断依赖系统时钟，升级后新任务使用开机标识，不依赖墙上时钟。
+同次开机重启 daemon 保持原有存活任务处理规则，Pending 继续正常调度。
+恢复结果先通过临时文件原子写入 Done，再删除 Running，允许中断后再次恢复。

@@ -267,7 +267,9 @@ EOF
     return 0
 }
 
-run_finishing_task_not_reaped
-run_real_orphan_reaped
-run_pidless_running_files_reaped
-echo "test_reap_orphans_race: OK"
+if [[ "${REAP_TEST_HARNESS_ONLY:-0}" != 1 ]]; then
+    run_finishing_task_not_reaped
+    run_real_orphan_reaped
+    run_pidless_running_files_reaped
+    echo "test_reap_orphans_race: OK"
+fi

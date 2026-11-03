@@ -421,6 +421,7 @@ sweep_task() {
 finalize_interrupted() {
     local task_id="$1"
     local exit_code="${2:-137}"
+    local reason="${3:-daemon-interrupted}"
     local rf="$RUNNING_DIR/$task_id"
     [ -f "$rf" ] || return 0
     local submit_user submit_time command device start_time request_raw request_origin
@@ -441,7 +442,9 @@ finalize_interrupted() {
     policy_env_pool=$(read_field DEVICE_POLICY_ENV_POOL "$rf" || true)
     global_pool=$(read_field DEVICE_GLOBAL_POOL "$rf" || true)
     global_pool_source=$(read_field DEVICE_GLOBAL_POOL_SOURCE "$rf" || true)
-    cat > "$DONE_DIR/$task_id" <<EOF
+    local done_tmp
+    done_tmp=$(mktemp "$DONE_DIR/.${task_id}.XXXXXX") || return 1
+    cat > "$done_tmp" <<EOF
 SUBMIT_USER=$submit_user
 SUBMIT_TIME=$submit_time
 COMMAND=$command
@@ -459,10 +462,34 @@ DEVICE_GLOBAL_POOL_SOURCE=$global_pool_source
 START_TIME=$start_time
 FINISH_TIME=$(date -Iseconds)
 EXIT_CODE=$exit_code
+INTERRUPT_REASON=$reason
+BOOT_ID=$(read_field BOOT_ID "$rf" || true)
 EOF
-    chmod 644 "$DONE_DIR/$task_id"
-    [ -f "$LOGS_DIR/${task_id}.log" ] && echo "[taskqueue] 任务被中断（daemon 停止或重启）" >> "$LOGS_DIR/${task_id}.log"
+    if [[ $? -ne 0 ]]; then
+        rm -f "$done_tmp"
+        return 1
+    fi
+    chmod 644 "$done_tmp" && mv -f "$done_tmp" "$DONE_DIR/$task_id" || return 1
+    [ -f "$LOGS_DIR/${task_id}.log" ] && echo "[taskqueue] 任务被中断（$reason）" >> "$LOGS_DIR/${task_id}.log"
     rm -f "$rf" "$RUNNING_DIR/${task_id}.env" "$FIFO_DIR/${task_id}" "$LOGS_DIR/${task_id}.sh"
+}
+
+# A different boot means every old PID is untrusted: never signal it or requeue.
+# Legacy records use START_TIME (or claim mtime before START_TIME was written).
+previous_boot_task() {
+    local rf="$1" boot start epoch
+    boot=$(read_field BOOT_ID "$rf" || true)
+    if [[ -n "$boot" ]]; then
+        [[ "$boot" != "$CURRENT_BOOT_ID" ]]
+        return
+    fi
+    start=$(read_field START_TIME "$rf" || true)
+    if [[ -n "$start" ]]; then
+        epoch=$(date -d "$start" +%s 2>/dev/null) || return 1
+    else
+        epoch=$(stat -c %Y "$rf") || return 1
+    fi
+    [[ "$epoch" -lt "$BOOT_TIME" ]]
 }
 
 # 启动时回收上一个 daemon 遗留的 running 任务。单例检查已保证旧 daemon 已死，
@@ -475,6 +502,11 @@ reconcile_running() {
         [[ "$rf" == *.env ]] && continue
         local task_id tpid
         task_id=$(basename "$rf")
+        if previous_boot_task "$rf"; then
+            log "reconcile: $task_id interrupted by server reboot (no signals, no retry)"
+            finalize_interrupted "$task_id" 137 server-reboot || exit 1
+            continue
+        fi
         tpid=$(read_field TASK_PID "$rf")
         if [ -n "$tpid" ] && kill -0 "$tpid" 2>/dev/null; then
             log "reconcile: $task_id still alive (pid=$tpid), leaving as-is"
@@ -488,6 +520,8 @@ reconcile_running() {
 
 # run one task
 run_task() {
+    # Close inside the fork: a function redirection can keep a saved copy open.
+    exec {DAEMON_LOCK_FD}>&-
     local task_id="$1"
 
     # 监管进程（本函数所在的后台 fork）的 pid，供 reap_orphans 判断"任务是否正在
@@ -756,6 +790,9 @@ start_pending_task() {
         IN_USE_SET="$IN_USE_SET$pending_dev,"
     fi
 
+    # Stamp after claiming, before forking; do not trust client-supplied boot IDs.
+    sed -i '/^BOOT_ID=/d' "$RUNNING_DIR/$task_id"
+    echo "BOOT_ID=$CURRENT_BOOT_ID" >> "$RUNNING_DIR/$task_id"
     run_task "$task_id" &
     JOB_PIDS+=($!)
     CURRENT_JOBS=$((CURRENT_JOBS + 1))
@@ -851,14 +888,18 @@ if [ "$(id -u)" -ne 0 ] && [ -z "${TASKQUEUE_ALLOW_USER:-}" ]; then
     exit 1
 fi
 
-# 单例保护：防止多个 daemon 同时运行
+# Keep the lock inode in root-owned state/, never the shared locks/ directory.
+# PID files are informational: a reboot can recycle their PID for another process.
+CURRENT_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id) || exit 1
+BOOT_TIME=$(awk '$1 == "btime" {print $2}' /proc/stat)
+[[ -n "$CURRENT_BOOT_ID" && "$BOOT_TIME" =~ ^[0-9]+$ ]] || exit 1
 PID_FILE="$STATE_DIR/task-daemon.pid"
-if [ -f "$PID_FILE" ]; then
-    old_pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-        echo "error: task-daemon already running (pid=$old_pid)" >&2
-        exit 1
-    fi
+DAEMON_LOCK_FILE="$STATE_DIR/task-daemon.lock"
+[[ ! -L "$DAEMON_LOCK_FILE" ]] || exit 1
+exec {DAEMON_LOCK_FD}>"$DAEMON_LOCK_FILE" || exit 1
+if ! flock -n "$DAEMON_LOCK_FD"; then
+    echo "error: task-daemon already running (lock held)" >&2
+    exit 1
 fi
 echo $$ > "$PID_FILE"
 

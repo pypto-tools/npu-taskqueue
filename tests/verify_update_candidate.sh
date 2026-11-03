@@ -10,6 +10,8 @@ bash -n task-daemon.sh task-submit.sh pypto-setup.sh setup.sh deploy.sh npu_lock
     modules/repo_auto_update/updater.sh
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR" \
     python3 -m unittest discover -s tests -p 'test_update_manifest.py'
+bash tests/test_reboot_recovery.sh
+bash tests/test_reap_orphans_race.sh
 bash tests/test_scheduler_core.sh
 bash tests/test_pool_aware_reservation.sh
 bash tests/test_device_group_affinity.sh
