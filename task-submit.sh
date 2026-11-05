@@ -14,6 +14,11 @@
 #   task-submit --maintenance [on|off|status]       维护模式管理
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# Keep monitoring entirely outside configuration, admission and submission.
+# In particular TASKQUEUE_CONF and the caller's project/environment are ignored.
+if [[ "${1:-}" == --monitor || ( "${1:-}" == --json && "${2:-}" == --monitor ) ]]; then
+    exec python3 -I "$SCRIPT_DIR/monitor.py" read "$@"
+fi
 if [[ -n "${TASKQUEUE_CONF:-}" ]]; then
     CONF_FILE="$TASKQUEUE_CONF"
 elif [[ -f "$SCRIPT_DIR/../config/taskqueue.conf" ]]; then
@@ -162,6 +167,7 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
 
 查询:
   task-submit --version                        显示已安装源码 revision
+  task-submit --monitor --json                  整机只读资源快照（所有提交用户）
   task-submit --wait <task-id>                 等待任务完成并实时输出日志
   task-submit --timeout N --wait <task-id>     自定义排队超时(秒，默认 600)
   task-submit --status <task-id>               查看任务状态

@@ -281,6 +281,21 @@ in the 0600 Feishu config. The hub server writes a document ID to
 `usage-index.json`, read by the performance tracker's report hub. Deploy a
 tracker version with this integration before enabling publication.
 
+## Local read-only monitoring
+
+`task-submit --monitor --json` and `pto-task --monitor --json` return the same
+machine-wide resource snapshot for ordinary monitoring accounts, including all
+submitters, active allocations, overlapping reservation pools, scheduler state
+and counts. The daemon publishes a sanitized atomic snapshot about every two
+seconds; the CLI ignores project configuration and device-pool environment
+variables. Stopped daemons, stale data and read failures never appear as an
+empty, free machine. No HTTP service or hardware probe is added.
+
+See the [monitor API and safe deployment instructions](docs/task-submit-monitor-api.md)
+and [JSON example](docs/task-submit-monitor.example.json). Activate through the
+existing guarded deployment process after running tasks finish; installing new
+files alone does not add monitoring to an already running older daemon.
+
 ## Source checkout mode
 
 The Git checkout remains source only. Running `task-submit.sh`,

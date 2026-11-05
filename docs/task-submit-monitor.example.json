@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "producer": {
+    "name": "pto-task",
+    "version": "example-running-revision"
+  },
+  "boot_id": "00000000-0000-4000-8000-000000000001",
+  "snapshot_seq": 42,
+  "observed_at": "2026-11-05T10:00:00.000Z",
+  "observed_monotonic_ns": 123000000000,
+  "age_ms": 120,
+  "status": "ok",
+  "reason": null,
+  "scheduler": {
+    "state": "running",
+    "mode": "pool_aware_reservation",
+    "accepting_submissions": true,
+    "dispatching": true,
+    "running_tasks": 1,
+    "pending_tasks": 1,
+    "max_concurrent": 8,
+    "reason": null
+  },
+  "devices": [
+    {
+      "id": "5",
+      "group_id": "g0",
+      "pool_eligible": true,
+      "state": "allocated",
+      "reason_codes": [
+        "allocated",
+        "reservation_pool"
+      ],
+      "allocation": {
+        "task_id": "task_example_running",
+        "user": "alice",
+        "uid": 1000,
+        "started_at": "2026-11-05T09:47:20.000Z",
+        "elapsed_seconds": 760
+      },
+      "reservation": {
+        "task_id": "task_example_waiting",
+        "user": "bob",
+        "uid": 1001,
+        "requested_devices": 2
+      },
+      "health": "unknown"
+    },
+    {
+      "id": "9",
+      "group_id": "g0",
+      "pool_eligible": true,
+      "state": "reserved",
+      "reason_codes": [
+        "reservation_pool"
+      ],
+      "allocation": null,
+      "reservation": {
+        "task_id": "task_example_waiting",
+        "user": "bob",
+        "uid": 1001,
+        "requested_devices": 2
+      },
+      "health": "unknown"
+    },
+    {
+      "id": "12",
+      "group_id": null,
+      "pool_eligible": false,
+      "state": "disabled",
+      "reason_codes": [
+        "outside_auto_pool"
+      ],
+      "allocation": null,
+      "reservation": null,
+      "health": "unknown"
+    }
+  ],
+  "summary": {
+    "total": 3,
+    "free": 0,
+    "allocated": 1,
+    "reserved": 1,
+    "disabled": 1,
+    "external": 0,
+    "error": 0,
+    "unknown": 0,
+    "occupying_users": 1
+  },
+  "inventory_complete": true,
+  "external_detection": "unsupported",
+  "daemon": {
+    "pid": 1234,
+    "start_ticks": 4567,
+    "uid": 0
+  },
+  "kernel_boot_id": "00000000-0000-4000-8000-000000000002"
+}

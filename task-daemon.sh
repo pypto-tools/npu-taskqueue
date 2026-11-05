@@ -499,6 +499,13 @@ run_task() {
     # 之前就挂掉"的窗口也被覆盖——那种 running 文件没有 TASK_PID，旧逻辑会永远
     # 跳过它，设备再也回不来。
     echo "RUN_TASK_PID=$BASHPID" >> "$RUNNING_DIR/$task_id"
+    # Monitor-only identity: a recycled PID must not authenticate an allocation.
+    # /proc stat's comm field can contain spaces/parentheses; split after it.
+    local monitor_proc_stat monitor_proc_fields
+    if IFS= read -r monitor_proc_stat < "/proc/$BASHPID/stat"; then
+        read -ra monitor_proc_fields <<< "${monitor_proc_stat##*) }"
+        printf 'RUN_TASK_START_TICKS=%s\n' "${monitor_proc_fields[19]}" >> "$RUNNING_DIR/$task_id"
+    fi
 
     parse_task_file "$RUNNING_DIR/$task_id"
 
@@ -917,6 +924,54 @@ trap 'reload_runtime_config' SIGHUP
 # 启动时加载一次设备白名单到内存
 load_runtime_devices
 
+# Capture the running revision and startup identity once, before later installs
+# can replace the release marker. Monitoring failure never stops queue work.
+MONITOR_IDENTITY=$(python3 -I "$SCRIPT_DIR/monitor.py" identity "$$" 2>/dev/null) || MONITOR_IDENTITY=""
+MONITOR_VERSION=$(cat "$SCRIPT_DIR/.pto-task-release" 2>/dev/null || true)
+if [[ -z "$MONITOR_VERSION" ]]; then
+    MONITOR_VERSION=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
+fi
+MONITOR_VERSION=${MONITOR_VERSION:-unknown}
+MONITOR_SEQ=0
+MONITOR_LAST_SECONDS=-2
+MONITOR_LAST_POLICY=""
+MONITOR_FAILED=0
+
+publish_monitor() {
+    [[ -n "$MONITOR_IDENTITY" ]] || return 0
+    local maintenance=0 reserved_task="" reserved_devices="" policy output monitor_pool
+    [[ -f "$MAINT_FILE" ]] && maintenance=1
+    if [[ "$maintenance" == 0 && "${POOL_AWARE_RESERVATION_ACTIVE:-0}" == 1 ]]; then
+        reserved_task="$POOL_AWARE_RESERVATION_RESERVED_TASK"
+        reserved_devices="$POOL_AWARE_RESERVATION_DEVICES"
+    fi
+    policy="$maintenance|$reserved_task|$reserved_devices|${RUNTIME_DEVICES:-}|$IN_USE_SET|$MONITOR_FAILED"
+    if [[ "${SCRIPT_DIR##*/}" == app ]]; then
+        output="$SCRIPT_DIR/../state/monitor.json"
+    else
+        output="$STATE_DIR/monitor.json"
+    fi
+    # Directory timestamps notice submit/cancel/reap; the periodic refresh also
+    # catches task metadata updates. Do not fork a collector every 200ms tick.
+    if (( SECONDS - MONITOR_LAST_SECONDS < 2 )) && [[ "$policy" == "$MONITOR_LAST_POLICY" &&
+          ! "$PENDING_DIR" -nt "$output" && ! "$RUNNING_DIR" -nt "$output" ]]; then
+        return 0
+    fi
+    MONITOR_SEQ=$((MONITOR_SEQ + 1))
+    MONITOR_LAST_SECONDS=$SECONDS
+    MONITOR_LAST_POLICY="$policy"
+    # Export the daemon's actual global pool, including its legacy auto-detect
+    # fallback. The monitor independently enumerates physical node IDs and can
+    # flag a mismatch; it must not silently repair scheduler policy here.
+    monitor_pool=$(scheduler_effective_pool "")
+    timeout --kill-after=1s 1s python3 -I "$SCRIPT_DIR/monitor.py" publish "$MONITOR_IDENTITY" \
+        "$STATE_DIR" "$MONITOR_VERSION" "$MONITOR_SEQ" "$SCHEDULER_MODE" "$MAX_CONCURRENT" \
+        "$monitor_pool" "$DEVICE_GROUPS" \
+        "$reserved_task" "$reserved_devices" "$maintenance" "$MONITOR_FAILED" \
+        >/dev/null || log "warning: monitor snapshot publication failed"
+    return 0
+}
+
 # 回收上次遗留的 running 任务，释放被永久占用的设备
 reconcile_running
 
@@ -1085,11 +1140,14 @@ while $RUNNING; do
 
     # 维护模式：跳过调度，但继续处理 kill 和 reap
     if [ -f "$MAINT_FILE" ]; then
+        publish_monitor
         sleep "$POLL_INTERVAL"
         continue
     fi
 
-    scheduler_schedule_tick
+    MONITOR_FAILED=0
+    scheduler_schedule_tick || MONITOR_FAILED=1
+    publish_monitor
 
     sleep "$POLL_INTERVAL"
 done

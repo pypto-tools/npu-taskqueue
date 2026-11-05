@@ -25,6 +25,7 @@ INSTALL_ROOT="$TOOLS_ROOT/pto-task"
 [[ "$(readlink -f "$BIN_DIR/pto-task")" == "$INSTALL_ROOT/app/task-submit" ]]
 [[ "$(readlink -f "$BIN_DIR/pypto-setup")" == "$INSTALL_ROOT/app/pypto-setup" ]]
 [[ -x "$INSTALL_ROOT/app/task-submit" ]]
+[[ -f "$INSTALL_ROOT/app/monitor.py" ]]
 [[ -x "$INSTALL_ROOT/app/pypto-setup" ]]
 [[ -f "$INSTALL_ROOT/config/pypto-env.conf" ]]
 grep -Fqx 'ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}"' \
@@ -411,6 +412,7 @@ bash "$REPO_DIR/tests/test_pool_aware_reservation.sh"
 bash "$REPO_DIR/tests/test_device_group_affinity.sh"
 bash "$REPO_DIR/tests/test_whitelist_pools.sh"
 bash "$REPO_DIR/tests/test_repo_auto_update_adapter.sh"
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s "$REPO_DIR/tests" -p 'test_monitor*.py'
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR" \
     python3 -m unittest discover -s "$REPO_DIR/tests" -p 'test_update_manifest.py'
 
