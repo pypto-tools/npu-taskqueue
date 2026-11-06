@@ -1,0 +1,10 @@
+[Unit]
+Description=Publish read-only task card usage
+After=pto-task.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/pypto-tools/pto-task/app/usage_monitor.py publish
+TimeoutStartSec=25
+UMask=0077
+Nice=10

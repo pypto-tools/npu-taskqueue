@@ -109,3 +109,10 @@ has no direct repository egress.
 For a source checkout, put equivalent local configuration in the ignored
 `runtime/config/taskqueue.conf`; source execution uses `runtime/state` and
 `runtime/logs` by default.
+
+
+Card-hour monitoring uses `USAGE_MONITOR_ENABLED=true` and
+`USAGE_MONITOR_TIMEZONE="UTC"` by default. It publishes only task accounting
+summaries through `task-submit --usage-monitor --json` every 30 seconds.
+Set the same timezone on all hosts; daily report settings remain independent.
+Disable the timer with `USAGE_MONITOR_ENABLED=false` and rerun setup.
