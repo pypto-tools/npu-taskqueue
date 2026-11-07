@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh task card usage every 30 seconds
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=30s
+AccuracySec=1s
+Unit=pto-task-usage-monitor.service
+
+[Install]
+WantedBy=timers.target

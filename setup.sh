@@ -484,6 +484,11 @@ install_app_file "$SCRIPT_DIR/pto-task-usage-sampler.sh" "$APP_DIR/pto-task-usag
 install_app_file "$SCRIPT_DIR/pto-task-stats.sh" "$APP_DIR/pto-task-stats" 755
 install_app_file "$SCRIPT_DIR/usage_report.py" "$APP_DIR/usage_report.py" 755
 install_app_file "$SCRIPT_DIR/monitor.py" "$APP_DIR/monitor.py" 644
+install_app_file "$SCRIPT_DIR/usage_monitor.py" "$APP_DIR/usage_monitor.py" 755
+for usage_monitor_unit in pto-task-usage-monitor.{service,timer}; do
+    rendered_unit="$(sed "s|/home/pypto-tools/pto-task/app|$APP_DIR|g" "$SCRIPT_DIR/$usage_monitor_unit")"
+    write_app_file "$APP_DIR/$usage_monitor_unit" 644 "$rendered_unit"$'\n'
+done
 for usage_report_unit in pto-task-usage-report-{collect,publish}.{service,timer}; do
     rendered_unit="$(sed "s|/home/pypto-tools/pto-task/app|$APP_DIR|g" "$SCRIPT_DIR/$usage_report_unit")"
     write_app_file "$APP_DIR/$usage_report_unit" 644 "$rendered_unit"$'\n'
@@ -693,6 +698,7 @@ services_started=false
 if [[ -f "$CONFIG_FILE" && "$(id -u)" -eq 0 ]]; then
     usage_sampling_enabled="$(bash -c 'source "$1"; printf "%s" "${USAGE_SAMPLING_ENABLED:-false}"' _ "$CONFIG_FILE")"
     usage_report_enabled="$(bash -c 'source "$1"; printf "%s" "${USAGE_REPORT_ENABLED:-false}"' _ "$CONFIG_FILE")"
+    usage_monitor_enabled="$(bash -c 'source "$1"; printf "%s" "${USAGE_MONITOR_ENABLED:-true}"' _ "$CONFIG_FILE")"
     install -d -m 755 /etc/systemd/system
     ln -sfn "$APP_DIR/pto-task.service" /etc/systemd/system/pto-task.service
     # Upgrade path: earlier installs pointed taskqueue.service at the same
@@ -732,6 +738,14 @@ if [[ -f "$CONFIG_FILE" && "$(id -u)" -eq 0 ]]; then
     systemctl disable --now pto-task-repo-auto-update.timer >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/pto-task-repo-auto-update.service \
         /etc/systemd/system/pto-task-repo-auto-update.timer
+    case "$usage_monitor_enabled" in
+        1|true|TRUE|yes|YES|on|ON)
+            for unit in pto-task-usage-monitor.{service,timer}; do
+                ln -sfn "$APP_DIR/$unit" "/etc/systemd/system/$unit"
+            done ;;
+        *) systemctl disable --now pto-task-usage-monitor.timer >/dev/null 2>&1 || true
+           rm -f /etc/systemd/system/pto-task-usage-monitor.{service,timer} ;;
+    esac
     case "$usage_sampling_enabled" in
         1|true|TRUE|yes|YES|on|ON)
             ln -sfn "$APP_DIR/pto-task-usage-sampler.service" /etc/systemd/system/pto-task-usage-sampler.service
@@ -788,6 +802,12 @@ if [[ -f "$CONFIG_FILE" && "$(id -u)" -eq 0 ]]; then
             printf 'Usage report timers enabled.\n'
             ;;
         *) printf 'Usage report timers not enabled (USAGE_REPORT_ENABLED is false).\n' ;;
+    esac
+    case "$usage_monitor_enabled" in
+        1|true|TRUE|yes|YES|on|ON)
+            systemctl enable --now pto-task-usage-monitor.timer
+            services_started=true
+            printf 'Card usage monitor timer enabled.\n' ;;
     esac
 elif [[ "$ENABLE_AUTO_UPDATE" == true ]]; then
     printf 'Update timer not enabled (requires root and initialized config).\n'

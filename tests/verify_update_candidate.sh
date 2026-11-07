@@ -11,9 +11,10 @@ bash -n task-daemon.sh task-submit.sh pypto-setup.sh setup.sh deploy.sh npu_lock
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR" \
     python3 -m unittest discover -s tests -p 'test_update_manifest.py'
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR" \
-    python3 -m unittest discover -s tests -p 'test_usage_report.py'
+    python3 -m unittest discover -s tests -p 'test_usage*.py'
 PYTHONDONTWRITEBYTECODE=1 \
     python3 -m unittest discover -s tests -p 'test_monitor*.py'
+bash tests/test_usage_install.sh
 bash tests/test_scheduler_core.sh
 bash tests/test_pool_aware_reservation.sh
 bash tests/test_device_group_affinity.sh

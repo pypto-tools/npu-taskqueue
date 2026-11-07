@@ -154,6 +154,7 @@ DEVICE_GLOBAL_POOL=$DEVICE_GLOBAL_POOL
 DEVICE_GLOBAL_POOL_SOURCE=$DEVICE_GLOBAL_POOL_SOURCE
 FINISH_TIME=$(date -Iseconds)
 EXIT_CODE=126
+ACCOUNTING_STATE=not_started
 EOF
     echo "$reason" > "$LOGS_DIR/${task_id}.log"
     chmod 644 "$LOGS_DIR/${task_id}.log"

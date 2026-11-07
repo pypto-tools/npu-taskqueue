@@ -19,6 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 if [[ "${1:-}" == --monitor || ( "${1:-}" == --json && "${2:-}" == --monitor ) ]]; then
     exec python3 -I "$SCRIPT_DIR/monitor.py" read "$@"
 fi
+if [[ "${1:-}" == --usage-monitor ]]; then
+    exec python3 -I "$SCRIPT_DIR/usage_monitor.py" read "$@"
+fi
 if [[ -n "${TASKQUEUE_CONF:-}" ]]; then
     CONF_FILE="$TASKQUEUE_CONF"
 elif [[ -f "$SCRIPT_DIR/../config/taskqueue.conf" ]]; then
@@ -172,6 +175,7 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
   task-submit --timeout N --wait <task-id>     自定义排队超时(秒，默认 600)
   task-submit --status <task-id>               查看任务状态
   task-submit --log <task-id>                  查看任务日志（已完成或运行中）
+  task-submit --usage-monitor --json             只读卡时快照（今日、7天、30天）
   task-submit --stats [--days N]               查看 NPU 使用统计（默认近 7 天）
   task-submit --usage status                    查看归档功能状态
   sudo task-submit --usage day --date YYYY-MM-DD 查看管理员日统计
@@ -1755,6 +1759,10 @@ clean_tasks() {
             [[ "$task_id" == *.env ]] && continue
             # 用 -mmin 精确按 N*24h 判定；-mtime +N 会因整日取整而实际保留约 N+1 天
             if [[ $(find "$f" -mmin +"$((CLEAN_DAYS * 1440))" 2>/dev/null) ]]; then
+                if [[ "$dir" == "$DONE_DIR" ]] && ! python3 -I "$SCRIPT_DIR/usage_monitor.py" archive --state-dir "$STATE_DIR" --record "$f"; then
+                    echo "保留未成功归档的任务: $task_id" >&2
+                    continue
+                fi
                 rm -f "$f" "${f}.env" "$LOGS_DIR/${task_id}.log" "$LOGS_DIR/${task_id}.sh" "$FIFO_DIR/${task_id}"
                 count=$((count + 1))
             fi

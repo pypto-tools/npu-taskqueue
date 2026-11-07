@@ -244,6 +244,30 @@ Samples are stored in `state/usage/YYYYMMDD.csv`. The sampler uses a per-run
 lock and a timeout for every `npu-smi` call, so a stalled device cannot block
 the queue daemon.
 
+### Public card-hour monitoring (development preview)
+
+`task-submit --usage-monitor --json` provides per-user card usage for today,
+the last 7 and the last 30 calendar days. An independent publisher combines
+archived tasks with verified running allocations; final records replace
+provisional values. Unknown end times freeze instead of continuing to charge.
+Cleanup archives completed tasks before removing them. Completed records are
+imported incrementally into daily aggregates; each sample overlays only live
+allocations. Ordinary samples skip unchanged records. Directory changes trigger
+metadata reconciliation; a five-minute content check catches same-timestamp edits.
+Fixed-size SQLite headers detect archive changes. Initial backfill, archive changes
+and timezone changes can take longer than ordinary refreshes.
+
+Setup installs the independent 30-second timer, enabled by default. Set
+`USAGE_MONITOR_ENABLED=false` to disable it. Use the same IANA
+`USAGE_MONITOR_TIMEZONE` on all nodes (default UTC); the existing daily-report
+timezone and Feishu publisher remain separate. Only summaries are public;
+the ledger stays private. Missing history and collector gaps are explicit.
+
+See the [interface contract](docs/task-submit-usage-monitor-api.md).
+Validate with the usage Python tests and `bash tests/test_usage_install.sh`.
+Use `python3 tests/benchmark_usage_monitor.py --history-tasks 50000 --done-files 1000`
+for an isolated synthetic benchmark, including process startup and reconciliation.
+
 ### Archived server usage and Feishu daily reports
 
 `task-submit --usage status` shows whether the independent collector is

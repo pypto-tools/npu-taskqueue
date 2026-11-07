@@ -1,0 +1,301 @@
+{
+  "schema_version": 1,
+  "status": "ok",
+  "reason": null,
+  "observed_at": "2026-11-06T12:00:00.000Z",
+  "age_ms": 0,
+  "cached": false,
+  "timezone": "UTC",
+  "covered_from": 1790942400,
+  "windows": [
+    {
+      "id": "today",
+      "start": 1793923200,
+      "end": 1793966400,
+      "complete": true,
+      "card_seconds": 460800,
+      "task_count": 3,
+      "users": [
+        {
+          "user": "alice",
+          "uid": 1000,
+          "card_seconds": 259200,
+          "task_count": 1,
+          "active_cards": 6
+        },
+        {
+          "user": "bob",
+          "uid": 1001,
+          "card_seconds": 144000,
+          "task_count": 1,
+          "active_cards": 0
+        },
+        {
+          "user": "ci-runner",
+          "uid": 1002,
+          "card_seconds": 57600,
+          "task_count": 1,
+          "active_cards": 0
+        }
+      ],
+      "daily": [
+        {
+          "date": "2026-11-06",
+          "card_seconds": 460800,
+          "complete": true
+        }
+      ]
+    },
+    {
+      "id": "7d",
+      "start": 1793404800,
+      "end": 1793966400,
+      "complete": true,
+      "card_seconds": 3225600,
+      "task_count": 21,
+      "users": [
+        {
+          "user": "alice",
+          "uid": 1000,
+          "card_seconds": 1814400,
+          "task_count": 7,
+          "active_cards": 6
+        },
+        {
+          "user": "bob",
+          "uid": 1001,
+          "card_seconds": 1008000,
+          "task_count": 7,
+          "active_cards": 0
+        },
+        {
+          "user": "ci-runner",
+          "uid": 1002,
+          "card_seconds": 403200,
+          "task_count": 7,
+          "active_cards": 0
+        }
+      ],
+      "daily": [
+        {
+          "date": "2026-10-31",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-01",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-02",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-03",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-04",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-05",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-06",
+          "card_seconds": 460800,
+          "complete": true
+        }
+      ]
+    },
+    {
+      "id": "30d",
+      "start": 1791417600,
+      "end": 1793966400,
+      "complete": true,
+      "card_seconds": 13824000,
+      "task_count": 90,
+      "users": [
+        {
+          "user": "alice",
+          "uid": 1000,
+          "card_seconds": 7776000,
+          "task_count": 30,
+          "active_cards": 6
+        },
+        {
+          "user": "bob",
+          "uid": 1001,
+          "card_seconds": 4320000,
+          "task_count": 30,
+          "active_cards": 0
+        },
+        {
+          "user": "ci-runner",
+          "uid": 1002,
+          "card_seconds": 1728000,
+          "task_count": 30,
+          "active_cards": 0
+        }
+      ],
+      "daily": [
+        {
+          "date": "2026-10-08",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-09",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-10",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-11",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-12",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-13",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-14",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-15",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-16",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-17",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-18",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-19",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-20",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-21",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-22",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-23",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-24",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-25",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-26",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-27",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-28",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-29",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-30",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-10-31",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-01",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-02",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-03",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-04",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-05",
+          "card_seconds": 460800,
+          "complete": true
+        },
+        {
+          "date": "2026-11-06",
+          "card_seconds": 460800,
+          "complete": true
+        }
+      ]
+    }
+  ]
+}
