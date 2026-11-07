@@ -28,7 +28,7 @@ MAX_USERS = 512
 MAX_SECONDS = 10**12
 RECONCILE_SECONDS = 300
 RETENTION_DAYS = 35
-FIELDS = {'SUBMIT_USER', 'START_TIME', 'FINISH_TIME', 'DEVICE', 'ACCOUNTING_STATE'}
+FIELDS = {'SUBMIT_USER', 'SUBMIT_TIME', 'START_TIME', 'FINISH_TIME', 'DEVICE', 'EXIT_CODE', 'ACCOUNTING_STATE'}
 
 
 def root_path():
@@ -148,6 +148,7 @@ def fingerprint(path):
 
 
 def read_done(path):
+    """Read trusted accounting fields, excluding explicit and legacy rejections."""
     before = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_mode & 0o022:
         raise ValueError('untrusted task record')
@@ -164,6 +165,15 @@ def read_done(path):
         return None
     if 'DEVICE' not in values or 'FINISH_TIME' not in values:
         raise ValueError('unfinished task record')
+    # Before ACCOUNTING_STATE existed, write_reject emitted EXIT_CODE=126 and
+    # omitted START_TIME entirely. Interrupted/started tasks include that key,
+    # even when empty; a missing start alone is not evidence of a rejection.
+    if ('ACCOUNTING_STATE' not in values and 'START_TIME' not in values
+            and values.get('EXIT_CODE') == '126' and values.get('SUBMIT_USER')
+            and values.get('SUBMIT_TIME')):
+        if timestamp(values['FINISH_TIME']) < timestamp(values['SUBMIT_TIME']):
+            raise ValueError('invalid rejection interval')
+        return None
     devices = values['DEVICE']
     if devices in ('', 'none'):
         return None

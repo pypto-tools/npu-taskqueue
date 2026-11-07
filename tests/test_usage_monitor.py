@@ -89,6 +89,50 @@ class UsageMonitorTest(UsageFixture):
         usage.archive_record(self.db, p)
         self.assertEqual(self.db.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
 
+    def test_legacy_rejects_preserve_coverage_without_charge(self):
+        for i, device in enumerate(('auto', 'auto:2', '0', '0,1')):
+            path = self.state / 'done' / f'task_legacy_reject_{i}'
+            path.write_text('SUBMIT_USER=alice\nSUBMIT_TIME=2026-11-05T23:00:00Z\n'
+                            'FINISH_TIME=2026-11-06T01:00:00Z\nEXIT_CODE=126\nDEVICE='+device+'\n')
+            path.chmod(0o644)
+        active, errors = usage.collect(self.db, self.state, self.live(count=0), self.now)
+        self.assertEqual(errors, set())
+        value = usage.report(self.db, self.now, ZoneInfo('UTC'), active, errors)
+        usage.validate(value)
+        self.assertEqual(value['status'], 'ok')
+        self.assertEqual(value['covered_from'], self.now-35*86400)
+        self.assertTrue(all(w['complete'] and w['card_seconds'] == 0 for w in value['windows']))
+        for path in (self.state / 'done').iterdir():
+            usage.archive_record(self.db, path)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+
+    def test_legacy_detection_keeps_incomplete_records_invalid(self):
+        fields = dict(SUBMIT_USER='alice', SUBMIT_TIME='2026-11-05T23:00:00Z',
+                      FINISH_TIME='2026-11-06T01:00:00Z', EXIT_CODE='126', DEVICE='0')
+        changes = ({'START_TIME': ''}, {'ACCOUNTING_STATE': 'started'}, {'EXIT_CODE': '1'},
+                   {'EXIT_CODE': None}, {'SUBMIT_TIME': None}, {'SUBMIT_USER': ''},
+                   {'FINISH_TIME': 'broken'}, {'FINISH_TIME': '2026-11-05T22:00:00Z'})
+        for change in changes:
+            with self.subTest(change=change):
+                current = {k:v for k,v in {**fields, **change}.items() if v is not None}
+                path = self.state / 'done/task_incomplete'
+                path.write_text(''.join(f'{k}={v}\n' for k,v in current.items()))
+                path.chmod(0o644)
+                with self.assertRaises((ValueError, KeyError)):
+                    usage.archive_record(self.db, path)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+
+    def test_started_task_exiting_126_still_accrues_usage(self):
+        path = self.done()
+        with path.open('a') as stream:
+            stream.write('SUBMIT_TIME=2026-11-05T22:00:00Z\nEXIT_CODE=126\n')
+        usage.archive_record(self.db, path)
+        value = usage.report(self.db, self.now, ZoneInfo('UTC'), {}, set())
+        usage.validate(value)
+        self.assertEqual(value['windows'][0]['card_seconds'], 4*3600)
+        self.assertEqual(value['windows'][1]['card_seconds'], 8*3600)
+        self.assertEqual(value['windows'][1]['task_count'], 1)
+
     def test_metadata_symlinks_and_incomplete_start_are_rejected(self):
         p = self.done()
         q = self.state / 'done/task_link'

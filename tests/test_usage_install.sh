@@ -22,6 +22,13 @@ record = root / 'state/done/task_usage_install'
 record.write_text('SUBMIT_USER=example\nDEVICE=0,1\nSTART_TIME=' + (now-timedelta(hours=1)).isoformat() + '\nFINISH_TIME=' + now.isoformat() + '\n')
 record.chmod(0o644)
 os.utime(record, (now.timestamp()-120, now.timestamp()-120))
+for suffix, device in (('auto', 'auto:2'), ('numeric', '0,1')):
+    rejected = root / ('state/done/task_legacy_reject_' + suffix)
+    rejected.write_text('SUBMIT_USER=example\nDEVICE=' + device + '\nSUBMIT_TIME='
+                        + (now-timedelta(hours=1)).isoformat() + '\nFINISH_TIME='
+                        + now.isoformat() + '\nEXIT_CODE=126\n')
+    rejected.chmod(0o644)
+    os.utime(rejected, (now.timestamp()-120, now.timestamp()-120))
 PY
 python3 -I "$installed/app/usage_monitor.py" publish
 "$test_root/bin/task-submit" --usage-monitor --json > "$test_root/before.json"
@@ -42,6 +49,8 @@ PY
 fi
 "$test_root/bin/task-submit" --clean --days 0
 test ! -f "$installed/state/done/task_usage_install"
+test ! -f "$installed/state/done/task_legacy_reject_auto"
+test ! -f "$installed/state/done/task_legacy_reject_numeric"
 python3 -I "$installed/app/usage_monitor.py" publish
 "$test_root/bin/task-submit" --usage-monitor --json > "$test_root/after.json"
 python3 - "$test_root/after.json" <<'PY'
