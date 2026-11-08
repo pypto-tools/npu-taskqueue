@@ -51,7 +51,7 @@ def empty(reason):
 
 def database(path, now):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    info = path.parent.stat(follow_symlinks=False)
+    info = path.parent.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
         raise ValueError('accounting directory must be private and owned by publisher')
     if path.is_symlink():
@@ -140,7 +140,7 @@ def cache_set(db, key, value):
 
 def fingerprint(path):
     try:
-        info = path.stat(follow_symlinks=False)
+        info = path.lstat()
     except FileNotFoundError:
         return None
     return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
@@ -149,7 +149,7 @@ def fingerprint(path):
 
 def read_done(path):
     """Read trusted accounting fields, excluding explicit and legacy rejections."""
-    before = path.stat(follow_symlinks=False)
+    before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid() or before.st_mode & 0o022:
         raise ValueError('untrusted task record')
     values = {}
@@ -157,7 +157,7 @@ def read_done(path):
         key, sep, value = line.partition('=')
         if sep and key in FIELDS:
             values[key] = value
-    after = path.stat(follow_symlinks=False)
+    after = path.lstat()
     fields = ('st_dev', 'st_ino', 'st_mtime_ns', 'st_ctime_ns', 'st_size', 'st_mode', 'st_uid')
     if any(getattr(before, key) != getattr(after, key) for key in fields):
         raise ValueError('task changed while reading')

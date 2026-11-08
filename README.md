@@ -257,6 +257,8 @@ metadata reconciliation; a five-minute content check catches same-timestamp edit
 Fixed-size SQLite headers detect archive changes. Initial backfill, archive changes
 and timezone changes can take longer than ordinary refreshes.
 
+The card-hour and device monitors support Python 3.9+ using standard-library modules.
+
 Setup installs the independent 30-second timer, enabled by default. Set
 `USAGE_MONITOR_ENABLED=false` to disable it. Use the same IANA
 `USAGE_MONITOR_TIMEZONE` on all nodes (default UTC); the existing daily-report

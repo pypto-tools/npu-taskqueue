@@ -78,7 +78,7 @@ def atomic_json(path, value):
 
 
 def signature(path):
-    s = path.stat(follow_symlinks=False)
+    s = path.lstat()
     return s.st_ino, s.st_mtime_ns, s.st_ctime_ns, s.st_size
 
 

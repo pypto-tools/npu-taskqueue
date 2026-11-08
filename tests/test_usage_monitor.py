@@ -133,6 +133,21 @@ class UsageMonitorTest(UsageFixture):
         self.assertEqual(value['windows'][1]['card_seconds'], 8*3600)
         self.assertEqual(value['windows'][1]['task_count'], 1)
 
+    def test_accounting_database_rejects_symlinked_or_public_directory(self):
+        private = self.state / 'private'
+        private.mkdir(mode=0o700)
+        linked = self.state / 'linked'
+        linked.symlink_to(private, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            usage.database(linked / 'usage.sqlite3', self.now)
+        self.assertFalse((private / 'usage.sqlite3').exists())
+        public = self.state / 'public'
+        public.mkdir()
+        public.chmod(0o755)
+        with self.assertRaises(ValueError):
+            usage.database(public / 'usage.sqlite3', self.now)
+        self.assertFalse((public / 'usage.sqlite3').exists())
+
     def test_metadata_symlinks_and_incomplete_start_are_rejected(self):
         p = self.done()
         q = self.state / 'done/task_link'
