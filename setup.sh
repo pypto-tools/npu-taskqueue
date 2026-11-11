@@ -484,6 +484,7 @@ install_app_file "$SCRIPT_DIR/pto-task-usage-sampler.sh" "$APP_DIR/pto-task-usag
 install_app_file "$SCRIPT_DIR/pto-task-stats.sh" "$APP_DIR/pto-task-stats" 755
 install_app_file "$SCRIPT_DIR/usage_report.py" "$APP_DIR/usage_report.py" 755
 install_app_file "$SCRIPT_DIR/monitor.py" "$APP_DIR/monitor.py" 644
+install_app_file "$SCRIPT_DIR/task_identity.py" "$APP_DIR/task_identity.py" 644
 install_app_file "$SCRIPT_DIR/usage_monitor.py" "$APP_DIR/usage_monitor.py" 755
 for usage_monitor_unit in pto-task-usage-monitor.{service,timer}; do
     rendered_unit="$(sed "s|/home/pypto-tools/pto-task/app|$APP_DIR|g" "$SCRIPT_DIR/$usage_monitor_unit")"

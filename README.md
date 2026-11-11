@@ -259,6 +259,24 @@ and timezone changes can take longer than ordinary refreshes.
 
 The card-hour and device monitors support Python 3.9+ using standard-library modules.
 
+Task submission now records `SUBMIT_UID`. At claim time the daemon checks the
+username and UID against the original file owner, freezes the metadata in a
+daemon-owned file, and carries that identity through completion and recovery.
+Root execution still charges the submitting account. Short tasks retain their
+UID even if no live sample observed them. The optional archive collector also
+preserves UID and migrates older databases with a nullable column. Legacy tasks
+with unknown identity remain separate unless a trusted record of the same task
+provides the missing UID; backfill changes attribution without adding card-hours.
+Known conflicting UIDs are reported instead of silently reassigned. Deploy the
+updated daemon through the existing safe upgrade procedure to activate this
+behavior for newly claimed tasks; no pto-btop protocol change is needed.
+
+The focused identity tests are included in `test_monitor*.py` and `test_usage*.py`.
+`tests/test_monitor_identity.py` additionally exercises an ordinary submitter and
+a real root daemon when run in an isolated root container; ordinary-user runs
+skip that case. It covers short tasks, nonzero exits, timeouts, termination and
+startup recovery without NPU hardware or host services.
+
 Setup installs the independent 30-second timer, enabled by default. Set
 `USAGE_MONITOR_ENABLED=false` to disable it. Use the same IANA
 `USAGE_MONITOR_TIMEZONE` on all nodes (default UTC); the existing daily-report

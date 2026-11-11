@@ -21,6 +21,7 @@ sys.dont_write_bytecode = True
 # -I deliberately excludes the caller's Python path and user site packages.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import monitor
+from task_identity import parse_uid
 from usage_report import config_value
 
 MAX_AGE_MS = 120000
@@ -28,7 +29,7 @@ MAX_USERS = 512
 MAX_SECONDS = 10**12
 RECONCILE_SECONDS = 300
 RETENTION_DAYS = 35
-FIELDS = {'SUBMIT_USER', 'SUBMIT_TIME', 'START_TIME', 'FINISH_TIME', 'DEVICE', 'EXIT_CODE', 'ACCOUNTING_STATE'}
+FIELDS = {'SUBMIT_USER', 'SUBMIT_UID', 'SUBMIT_TIME', 'START_TIME', 'FINISH_TIME', 'DEVICE', 'EXIT_CODE', 'ACCOUNTING_STATE'}
 
 
 def root_path():
@@ -110,6 +111,17 @@ def put(db, task, final, source_rank=2):
     task_id, start, user, uid, end, cards = task
     if not user or len(user.encode()) > 256 or not 0 <= start <= end or not 0 <= cards <= 256:
         raise ValueError('invalid task accounting')
+    if uid is not None and (type(uid) is not int or not 0 <= uid < 2**32 - 1):
+        raise ValueError('invalid submitter UID')
+    previous = db.execute('SELECT username,uid FROM tasks WHERE task_id=? AND started=?',
+                          (task_id, start)).fetchone()
+    if previous and previous[0] == user and uid is not None:
+        if previous[1] is not None and previous[1] != uid:
+            raise ValueError('conflicting submitter UID for the same task')
+        # Identity can be recovered from the same task in an archive without
+        # allowing that older source to overwrite authoritative final timings.
+        if previous[1] is None:
+            db.execute('UPDATE tasks SET uid=? WHERE task_id=? AND started=?', (uid, task_id, start))
     # Final metadata beats running observations and the older hourly archive.
     # Unchanged values must not dirty the daily cache or rewrite the ledger.
     db.execute("""INSERT INTO tasks
@@ -156,6 +168,8 @@ def read_done(path):
     for line in monitor.bounded_read(path, 1024 * 1024).decode('utf-8', 'replace').splitlines():
         key, sep, value = line.partition('=')
         if sep and key in FIELDS:
+            if key in values:
+                raise ValueError('duplicate accounting field')
             values[key] = value
     after = path.lstat()
     fields = ('st_dev', 'st_ino', 'st_mtime_ns', 'st_ctime_ns', 'st_size', 'st_mode', 'st_uid')
@@ -180,7 +194,7 @@ def read_done(path):
     ids = devices.split(',')
     if any(not x.isdigit() for x in ids) or len(set(ids)) != len(ids):
         raise ValueError('unresolved device assignment')
-    return (path.name, timestamp(values['START_TIME']), values['SUBMIT_USER'], None,
+    return (path.name, timestamp(values['START_TIME']), values['SUBMIT_USER'], parse_uid(values.get('SUBMIT_UID')),
             timestamp(values['FINISH_TIME']), len(ids))
 
 
@@ -210,13 +224,14 @@ def import_archive(db, path):
     if path.is_file():
         # Never initialize, migrate, chmod or query sessions in the old archive.
         with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=1) as old:
-            for task_id, user, start, end, devices in old.execute(
-                    'SELECT task_id,username,started,finished,devices FROM tasks'):
+            uid_column = 'uid' if 'uid' in {row[1] for row in old.execute('PRAGMA table_info(tasks)')} else 'NULL'
+            for task_id, user, start, end, devices, uid in old.execute(
+                    'SELECT task_id,username,started,finished,devices,' + uid_column + ' FROM tasks'):
                 ids = [x for x in devices.split(',') if x]
                 if not all(x.isdigit() for x in ids) or len(ids) != len(set(ids)):
                     raise ValueError('invalid archived devices')
                 if ids:
-                    put(db, (task_id, int(start), user, None, int(end), len(ids)), True, source_rank=1)
+                    put(db, (task_id, int(start), user, uid, int(end), len(ids)), True, source_rank=1)
     if generation() == before:
         cache_set(db, 'archive_generation', before)
 
@@ -303,7 +318,11 @@ def collect(db, state, live, now):
             except (KeyError, TypeError, ValueError, AttributeError):
                 errors.add('live_usage_incomplete')
         for (task_id, start), (user, uid, devices) in tasks.items():
-            put(db, (task_id, start, user, uid, max(start, now - live["age_ms"] // 1000), len(devices)), False)
+            try:
+                put(db, (task_id, start, user, uid, max(start, now - live["age_ms"] // 1000), len(devices)), False)
+            except ValueError:
+                errors.add('live_usage_incomplete')
+                continue
             final = db.execute('SELECT final FROM tasks WHERE task_id=? AND started=?', (task_id, start)).fetchone()[0]
             if not final:
                 active[(user, uid)] += len(devices)

@@ -55,7 +55,9 @@ TASKQUEUE_DEVICE_CONF 或 TASKQUEUE_INSIDE 影响。两个命令别名均解析�
 - `pool_eligible`：是否在运行 daemon 的全局自动池中。
 - `state`、`reason_codes`：队列资源状态和原因数组。
 - `allocation`：null 或 `{task_id,user,uid,started_at,elapsed_seconds}`。
-  用户来自 SUBMIT_USER；UID 在生成快照时解析，解析失败为 null、status 为 partial。
+  用户来自 SUBMIT_USER；新任务优先使用 daemon 接管时校验并持久化的 SUBMIT_UID，
+  不受之后的账号删除、改名或 UID 变更影响。pending 的 UID 须与提交文件所有者和用户名匹配。
+  旧运行记录没有该字段时仍按用户名解析；明确为空、非法或不可信的 UID 为 null、status 为 partial。
   时间描述任务启动而非硬件实际忙碌时间，启动元数据尚未完成时允许 null。
 - `reservation`：null 或 `{task_id,user,uid,requested_devices}`，来自真实调度 tick。
 - `health`：第一版为 unknown。没有利用率、显存、温度或硬件健康的推断值。
