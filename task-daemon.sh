@@ -72,6 +72,7 @@ CURRENT_JOBS=0
 parse_task_file() {
     local file="$1"
     SUBMIT_USER=""
+    SUBMIT_UID=""
     SUBMIT_TIME=""
     WORK_DIR=""
     COMMAND=""
@@ -94,6 +95,7 @@ parse_task_file() {
     while IFS='=' read -r key value; do
         case "$key" in
             SUBMIT_USER) SUBMIT_USER="$value" ;;
+            SUBMIT_UID) SUBMIT_UID="$value" ;;
             SUBMIT_TIME) SUBMIT_TIME="$value" ;;
             WORK_DIR)    WORK_DIR="$value" ;;
             COMMAND)     COMMAND="$value" ;;
@@ -139,6 +141,7 @@ write_reject() {
     local reason="$2"
     cat > "$DONE_DIR/$task_id" <<EOF
 SUBMIT_USER=$SUBMIT_USER
+SUBMIT_UID=$SUBMIT_UID
 SUBMIT_TIME=$SUBMIT_TIME
 COMMAND=$COMMAND
 DEVICE=$DEVICE
@@ -424,10 +427,11 @@ finalize_interrupted() {
     local exit_code="${2:-137}"
     local rf="$RUNNING_DIR/$task_id"
     [ -f "$rf" ] || return 0
-    local submit_user submit_time command device start_time request_raw request_origin
+    local submit_user submit_uid submit_time command device start_time request_raw request_origin
     local sequence_source policy_conf policy_whitelist policy_blacklist policy_ignore_whitelist policy_env_pool
     local global_pool global_pool_source
     submit_user=$(read_field SUBMIT_USER "$rf" || true)
+    submit_uid=$(read_field SUBMIT_UID "$rf" || true)
     submit_time=$(read_field SUBMIT_TIME "$rf" || true)
     command=$(read_field COMMAND "$rf" || true)
     device=$(read_field DEVICE "$rf" || true)
@@ -444,6 +448,7 @@ finalize_interrupted() {
     global_pool_source=$(read_field DEVICE_GLOBAL_POOL_SOURCE "$rf" || true)
     cat > "$DONE_DIR/$task_id" <<EOF
 SUBMIT_USER=$submit_user
+SUBMIT_UID=$submit_uid
 SUBMIT_TIME=$submit_time
 COMMAND=$command
 DEVICE=$device
@@ -727,6 +732,7 @@ run_task() {
 
     cat > "$DONE_DIR/$task_id" <<EOF
 SUBMIT_USER=$SUBMIT_USER
+SUBMIT_UID=$SUBMIT_UID
 SUBMIT_TIME=$SUBMIT_TIME
 COMMAND=$COMMAND
 DEVICE=$DEVICE
@@ -773,14 +779,20 @@ start_pending_task() {
         log "skip $task_id (already taken)"
         return 1
     fi
-    # Older clients may create task metadata with mode 600. Normalize it so
-    # every queue user can continue to inspect running tasks.
-    chmod 644 "$RUNNING_DIR/$task_id" 2>/dev/null || log "warning: cannot normalize permissions for $task_id"
+    # Validate the original owner's identity before replacing client-owned
+    # metadata with a daemon-owned snapshot. Freeze UID even for short tasks
+    # that will finish before the next accounting sample.
+    if ! python3 -I "$SCRIPT_DIR/task_identity.py" freeze "$RUNNING_DIR/$task_id" "$pending_dev"; then
+        parse_task_file /dev/null
+        SUBMIT_UID=""  # rejected client identity must never become trusted data
+        write_reject "$task_id" "error: invalid submitter identity or task metadata"
+        rm -f "$PENDING_DIR/${task_id}.env"
+        return 1
+    fi
     [ -f "$PENDING_DIR/${task_id}.env" ] && mv "$PENDING_DIR/${task_id}.env" "$RUNNING_DIR/${task_id}.env" 2>/dev/null
 
     # Resolve DEVICE only after the sticky-directory claim succeeds.
     if [[ -n "$pending_dev" && "$pending_dev" != "none" ]]; then
-        sed -i "s/^DEVICE=.*/DEVICE=$pending_dev/" "$RUNNING_DIR/$task_id"
         IN_USE_SET="$IN_USE_SET$pending_dev,"
     fi
 

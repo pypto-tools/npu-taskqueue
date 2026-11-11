@@ -1378,6 +1378,7 @@ submit_task() {
 
     cat > "$task_file_tmp" <<EOF
 SUBMIT_USER=$(whoami)
+SUBMIT_UID=$(id -u)
 SUBMIT_TIME=$(date -Iseconds)
 WORK_DIR=$(pwd)
 COMMAND=$cmd
