@@ -785,8 +785,8 @@ start_pending_task() {
     if ! python3 -I "$SCRIPT_DIR/task_identity.py" freeze "$RUNNING_DIR/$task_id" "$pending_dev"; then
         parse_task_file /dev/null
         SUBMIT_UID=""  # rejected client identity must never become trusted data
-        write_reject "$task_id" "error: invalid submitter identity or task metadata"
         rm -f "$PENDING_DIR/${task_id}.env"
+        write_reject "$task_id" "error: invalid submitter identity or task metadata"
         return 1
     fi
     [ -f "$PENDING_DIR/${task_id}.env" ] && mv "$PENDING_DIR/${task_id}.env" "$RUNNING_DIR/${task_id}.env" 2>/dev/null
