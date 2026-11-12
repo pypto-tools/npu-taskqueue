@@ -485,9 +485,9 @@ class RankingTests(unittest.TestCase):
         with mock.patch.object(usage, 'records', return_value=(snapshots, {'skipped_records': 0})), \
              mock.patch.object(usage.time, 'time', return_value=1_000_000):
             data = usage.ranking(Path('/unused'), days=0)
-        self.assertEqual([row['user'] for row in data['ranking']], ['bob', 'alice', 'unknown'])
-        self.assertEqual(data['ranking'][1]['mean_compute_utilization_pct'], 10)
-        self.assertEqual(data['ranking'][1]['valid_coverage_pct'], 10)
+        self.assertEqual([row['user'] for row in data['ranking']], ['alice', 'bob', 'unknown'])
+        self.assertEqual(data['ranking'][0]['mean_compute_utilization_pct'], 10)
+        self.assertEqual(data['ranking'][0]['valid_coverage_pct'], 10)
         self.assertIsNone(data['ranking'][2]['mean_compute_utilization_pct'])
         self.assertIsNone(data['ranking'][2]['rank'])
         self.assertNotIn('private command', json.dumps(data))
@@ -502,7 +502,7 @@ class RankingTests(unittest.TestCase):
             data = usage.ranking(Path('/unused'), days=7, sort='coverage', limit=1)
         self.assertEqual(data['total_users'], 2)
         self.assertEqual(len(data['ranking']), 1)
-        self.assertEqual(data['ranking'][0]['user'], 'alice')
+        self.assertEqual(data['ranking'][0]['user'], 'bob')
         self.assertEqual(data['status'], 'partial')
         self.assertEqual(data['skipped_records'], 1)
 

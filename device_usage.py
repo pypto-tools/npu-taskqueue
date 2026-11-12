@@ -619,7 +619,7 @@ def percent(value):
     return '-' if value is None else f'{value:.1f}%'
 
 
-def ranking(state, days=7, sort='utilization', limit=20):
+def ranking(state, days=2, sort='utilization', limit=20):
     now = time.time()
     snapshots, quality = records(state, now)
     # Public aggregates are intentionally separate from --stats' own-user view.
@@ -627,18 +627,18 @@ def ranking(state, days=7, sort='utilization', limit=20):
     rows = aggregate(snapshots, days, now)
     skipped = quality['skipped_records']
     key = 'mean_compute_utilization_pct' if sort == 'utilization' else 'valid_coverage_pct'
-    rows.sort(key=lambda row: (row[key] is None, -(row[key] or 0), row['user']))
+    rows.sort(key=lambda row: (row[key] is None, row[key] or 0, row['user']))
     for index, row in enumerate(rows, 1):
         row['rank'] = index if row[key] is not None else None
     return dict(schema_version=1, status='partial' if skipped else 'ok' if rows else 'empty',
                 advisory=True, generated_at=now, days=days, window_basis='task_started_at',
-                coverage_basis='recorded_card_seconds', sort=sort, order='descending',
+                coverage_basis='recorded_card_seconds', sort=sort, order='ascending',
                 total_users=len(rows), skipped_records=skipped, ranking=rows[:limit])
 
 
 def print_ranking(data):
     metric = '平均计算利用率' if data['sort'] == 'utilization' else '有效采样覆盖率'
-    print(f'采样排名（按用户；{metric}降序；按任务开始时间筛选；仅供参考）')
+    print(f'采样排名（按用户；{metric}升序，低者在前；按任务开始时间筛选；仅供参考）')
     print('名次  用户                  平均计算利用率  有效覆盖率  有效样本  疑似空闲卡时(h)')
     for row in data['ranking']:
         rank = '-' if row['rank'] is None else str(row['rank'])
@@ -762,7 +762,7 @@ def main():
     stats.add_argument('days', type=int)
     ranks = commands.add_parser('ranking', help='read public per-user sampling aggregates')
     ranks.add_argument('state', type=Path)
-    ranks.add_argument('--days', type=int, default=7)
+    ranks.add_argument('--days', type=int, default=2)
     ranks.add_argument('--sort', choices=('utilization', 'coverage'), default='utilization')
     ranks.add_argument('--limit', type=int, default=20)
     ranks.add_argument('--json', action='store_true')

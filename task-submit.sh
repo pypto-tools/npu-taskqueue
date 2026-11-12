@@ -182,8 +182,7 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
   task-submit --timeout N --wait <task-id>     自定义排队超时(秒，默认 600)
   task-submit --status <task-id>               查看任务状态
   task-submit --device-usage <task-id> [--json] 查看设备采样和疑似空闲记录
-  task-submit --usage-ranking [--days N] [--sort utilization|coverage] [--limit N] [--json]
-                                             查看用户采样排名（默认近 7 天、利用率降序）
+  task-submit --usage-ranking                  查看用户利用率排名（近 2 天，利用率低者在前）
   task-submit --log <task-id>                  查看任务日志（已完成或运行中）
   task-submit --usage-monitor --json             只读卡时快照（今日、7天、30天）
   task-submit --stats [--days N]               查看 NPU 使用统计（默认近 7 天）
