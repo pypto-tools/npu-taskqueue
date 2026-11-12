@@ -287,6 +287,17 @@ covered with fixtures; a new platform still requires validation against its
 actual driver output. See Huawei's [physical-ID remap reference](https://www.hiascend.com/document/detail/zh/Atlas%20200I%20A2/253RC1/re/npu/npusmi_059.html)
 and the [950 mapping/query implementation in SwanLab](https://github.com/SwanHubX/SwanLab/blob/main/swanlab/sdk/internal/probe_python/hardware_vendor/accelerator/huawei.py).
 
+Real-device checks on Ascend950DT / 9581 (board-reported software
+`25.6.rc2.b023`) confirmed the A5 layout above and successful `usages -i N`
+queries. Adding `-c 0` returned exit code 215 with
+`This device does not support input parameter of -c.` The A5 `phyid-remap`
+response uses `Chip Phy-ID` and also omits a logic ID; the sampler uses the
+explicit physical-ID table. Queries on that host intermittently exceeded both
+2-second and 5-second deadlines, including calls without a probe guard. A
+bounded sampling run recorded four valid samples and an idle event, then
+correctly transitioned to unknown on timeout. Keep query deadlines and backoff;
+a timeout provides no zero-utilization evidence.
+
 Records live in `state/usage/tasks/TASK_ID.json`, with task/user/device identity,
 timestamps, per-card totals and the most recent 16 events per card. Event counts
 and cumulative durations include older events too. Records survive normal task
