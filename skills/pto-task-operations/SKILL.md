@@ -96,6 +96,22 @@ integration test.
 
 ## Operate safely
 
+### Keep device tasks to one onboard case
+
+Use a device allocation only for the runtime execution of one independent
+onboard test case or workload configuration. Choose the device count required
+by that case. Do not put compilation, environment setup, input generation,
+multiple cases, a whole benchmark suite, or result aggregation into the same
+device task. Run CPU-only preparation and post-processing outside the device
+allocation; if they must be queued, submit them with `--no-device`. Submit
+repeated cases as separate tasks. A case may retain its own repeated runtime
+rounds when those rounds are the measurement itself.
+
+The scheduler reserves every requested device for the lifetime of the submitted
+process. Releasing a runtime-level device handle inside that process does not
+release the task's scheduler allocation. Keep the task command bounded to the
+single case so unrelated work does not hold cards or queue slots.
+
 Use `task-submit --list` before maintenance. Submit with the existing syntax,
 for example `task-submit --device auto --run "python train.py"`. Use
 `--status`, `--log`, `--wait`, `--cancel`, and `--kill` with a task id.

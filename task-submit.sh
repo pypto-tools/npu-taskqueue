@@ -159,6 +159,13 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
     --no-device        不占卡（也是默认行为）。编译、CPU 任务用这个
     --device auto      需要在卡上跑时才分配；作业内用 $TASK_DEVICE 拿到卡号
 
+  task-submit 的任务粒度:
+    一个占卡任务只做一次独立的上板用例（一个 testcase / 一个 workload 配置）。
+    编译、依赖安装、生成输入、结果汇总等不占卡的准备和后处理应在任务外完成；
+    如果工具必须统一排队执行这些步骤，使用 --no-device。不要把多个用例、整套
+    benchmark 或 build + test + 汇总脚本打包进一个占卡任务。确需多个卡时，按该
+    单个用例的实际需要用 --device-num N；多次运行由调用方逐个提交。
+
 提交:
   task-submit --no-device --run "command"      不占卡执行（编译 / CPU 测试）
   task-submit "command"                        提交任务，返回 task-id（默认不分配 NPU 卡）

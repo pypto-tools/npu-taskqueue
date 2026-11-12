@@ -143,6 +143,14 @@ MAX_CONCURRENT_8_CARD_TASKS=1
 
 ## 提交
 
+### 占卡任务的粒度
+
+一个占卡任务只运行一个独立的上板用例或 workload 配置，并按该用例的实际需求
+申请卡数。编译、依赖安装、输入生成、结果汇总等不占卡的准备和后处理放在
+`task-submit` 外执行；如需排队执行这些 CPU 步骤，使用 `--no-device`。多个用例或
+配置分别提交。单个用例自身的多轮运行可以留在同一个任务中。调度器会在整个提交
+进程存活期间保留卡；进程内部释放 runtime/device handle 不会提前归还调度资源。
+
 ```bash
 # NPU 任务 —— 自动分配空闲卡，并自动在命令末尾追加 "--device <卡号>"
 task-submit --device auto --run "python train.py"
