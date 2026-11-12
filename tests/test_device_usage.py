@@ -137,6 +137,23 @@ class ClassificationTests(unittest.TestCase):
             self.assertEqual(signals.call_args_list[-1].args[1], signal.SIGKILL)
         proc.wait.assert_not_called()
 
+    def test_canceled_successful_exit_is_not_a_valid_sample(self):
+        probes = usage.Probes()
+        reader, writer = os.pipe()
+        os.close(writer)
+        output = os.fdopen(reader, 'rb')
+        os.set_blocking(reader, False)
+        proc = mock.Mock(pid=12345)
+        proc.poll.return_value = 0
+        probes.jobs[('usage', '12')] = dict(proc=proc, output=output,
+            buffer=bytearray(b'Aicore Usage Rate(%): 0'), overflow=False,
+            started=0, terminated=None, reported=False)
+        with mock.patch.object(usage.os, 'killpg'):
+            probes.cancel(('usage', '12'), 1)
+            result = probes.poll(1.1)
+        self.assertEqual(result[0][2], 'query_timeout')
+        self.assertFalse(probes.jobs)
+
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
@@ -307,12 +324,52 @@ else:
     def test_stale_and_malformed_files_are_not_idle(self):
         sampler = usage.Sampler(['12'])
         data = sampler.snapshot(self.task, self.user, sampler.started)
-        data['devices']['12'].update(state='suspected_idle', observed_at=time.time() - 100)
+        now = time.time()
+        data['started_at'] = now - 120
+        data['devices']['12'].update(state='suspected_idle', observed_at=now - 100,
+            event_count=1, events=[dict(started_at=now-110, last_observed_at=now-100,
+                                       ended_at=None, end_reason=None)])
         self.output.write_text(json.dumps(data))
         self.assertEqual(usage.read_snapshot(self.state, self.task)['devices']['12']['state'], 'unknown')
         self.output.write_text('{')
         with self.assertRaises(ValueError):
             usage.read_snapshot(self.state, self.task)
+
+    def test_corrupt_records_cannot_crash_public_queries(self):
+        config = self.root / 'corrupt.conf'
+        config.write_text('STATE_DIR=' + str(self.state) + '\n')
+        env = dict(self.env, TASKQUEUE_CONF=str(config))
+        env.pop('TASKQUEUE_INSIDE', None)
+        sampler = usage.Sampler(['12'])
+        missing_event = sampler.snapshot(self.task, self.user, sampler.started, final=True)
+        missing_event['devices']['12']['state'] = 'suspected_idle'
+        invalid_event = json.loads(json.dumps(missing_event))
+        invalid_event['devices']['12']['events'] = [dict(started_at=float('nan'),
+            last_observed_at=0, ended_at=None, end_reason=None)]
+        for payload in ('[' * 2000 + '0' + ']' * 2000, json.dumps(missing_event), json.dumps(invalid_event)):
+            with self.subTest(payload=payload[:30]):
+                self.output.write_text(payload)
+                ranked = subprocess.run(['bash', str(REPO / 'task-submit.sh'), '--usage-ranking', '--json'],
+                                        env=env, capture_output=True, text=True, timeout=3)
+                self.assertEqual(ranked.returncode, 0, ranked.stderr)
+                result = json.loads(ranked.stdout)
+                self.assertEqual(result['status'], 'partial')
+                self.assertEqual(result['skipped_records'], 1)
+                detail = subprocess.run(['bash', str(REPO / 'task-submit.sh'), '--device-usage', self.task, '--json'],
+                                        env=env, capture_output=True, text=True, timeout=3)
+                self.assertEqual(detail.returncode, 1)
+                self.assertEqual(json.loads(detail.stdout)['status'], 'unknown')
+                self.assertNotIn('Traceback', detail.stderr)
+
+    def test_oversized_allocation_disables_only_telemetry(self):
+        devices = ','.join(str(i) for i in range(usage.MAX_DEVICES + 1))
+        result = subprocess.run([sys.executable, '-I', str(REPO / 'device_usage.py'), 'run',
+            '--output', str(self.output), '--task-id', self.task, '--user', self.user,
+            '--devices', devices, '--', sys.executable, '-c', 'raise SystemExit(7)'],
+            env=dict(self.env, TASK_DEVICE=devices), capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn('telemetry disabled', result.stderr)
+        self.assertFalse(self.trace.exists())
 
     def test_safe_files_and_prepare_collision(self):
         with self.assertRaises(FileExistsError):

@@ -266,6 +266,9 @@ jobs need not produce an idle event. These are sampled observations, not proof
 that no kernel ran between samples. No task is killed and no allocation released
 based on telemetry. Submitters can modify their own advisory telemetry; it is
 separate from authoritative card-time accounting and scheduling.
+The sampler supports up to 64 devices in one allocation. Larger allocations run
+normally with telemetry disabled; telemetry availability does not change the
+workload's exit code.
 
 Queries are polled without blocking the workload, with at most two probes per
 job, a per-query deadline (2 seconds by default, at most 5), a one-second SIGTERM
@@ -319,11 +322,15 @@ The default is the top 20 users over seven days, sorted by mean computation
 utilization descending. `--sort coverage` selects valid sampling coverage;
 `--limit` accepts 1–100 and `--days 0` includes all retained records. Both metrics,
 valid/total sample counts, recorded card-seconds, suspected idle card-seconds and
-task/event counts appear in JSON. Utilization is weighted by valid sample count;
+task/event counts appear in JSON. Each valid sample uses the maximum recognized
+AI Core, AI vector, AI CPU, AI cube or NPU utilization percentage. HBM occupancy
+and control-CPU usage are excluded. The mean is weighted by valid sample count;
 coverage is valid sampled intervals divided by recorded card duration. Missing
 utilization is `null` and unranked, never zero. Tasks are selected by start time,
 as in the telemetry table. This summarizes sampled, readable records, not every
 allocation on the host; unreadable/incomplete records are counted as skipped.
+Malformed records, invalid event timestamps and excessive JSON nesting are
+skipped without preventing other users' records from being ranked.
 
 The interface only reads stored telemetry and publishes user aggregates; no
 task IDs, commands, environments, individual events or login information are

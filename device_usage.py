@@ -262,7 +262,10 @@ class Probes:
             rc = job['proc'].poll()
             if rc is not None:
                 if not job['reported']:
-                    reason = None if rc == 0 else 'query_failed'
+                    # A canceled query can catch SIGTERM, print a value, and
+                    # exit zero. Its result still belongs to an expired round.
+                    reason = ('query_timeout' if job['terminated'] is not None
+                              else None if rc == 0 else 'query_failed')
                     results.append((key, job['buffer'].decode('utf-8', 'replace'), reason))
                 # Kill descendants too, even if the leader exited successfully.
                 self.signal(job, signal.SIGKILL)
@@ -490,7 +493,10 @@ def read_snapshot(state, task_id, now=None):
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES or info.st_nlink != 1:
             raise ValueError('unsafe telemetry file')
-        data = json.loads(stream.read(MAX_BYTES + 1))
+        try:
+            data = json.loads(stream.read(MAX_BYTES + 1))
+        except RecursionError as exc:
+            raise ValueError('telemetry nesting exceeds parser limits') from exc
     if data['schema_version'] != 1 or data['task_id'] != task_id or data['advisory'] is not True:
         raise ValueError('invalid telemetry identity')
     # A submitter can alter its own advisory samples, never attribute them to
@@ -508,6 +514,9 @@ def read_snapshot(state, task_id, now=None):
             continue
         if not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= now + 5:
             raise ValueError('invalid telemetry time')
+    if (data['updated_at'] < data['started_at'] or
+            data['finished_at'] is not None and data['finished_at'] < data['started_at']):
+        raise ValueError('invalid telemetry interval')
     for device, card in data['devices'].items():
         if not device.isdigit() or card['state'] not in ('unknown', 'active', 'startup', 'zero', 'suspected_idle'):
             raise ValueError('invalid telemetry state')
@@ -518,6 +527,22 @@ def read_snapshot(state, task_id, now=None):
                 card['compute_sum'] > 100 * card['valid_samples'] + .001 or
                 card['idle_seconds'] > card['valid_seconds'] + .001):
             raise ValueError('inconsistent telemetry totals')
+        events = card['events']
+        if not isinstance(events, list) or len(events) > MAX_EVENTS:
+            raise ValueError('invalid telemetry events')
+        for event in events:
+            for key in ('started_at', 'last_observed_at', 'ended_at'):
+                value = event[key]
+                if key == 'ended_at' and value is None:
+                    continue
+                if (not isinstance(value, (int, float)) or not math.isfinite(value)
+                        or not data['started_at'] <= value <= data['updated_at']):
+                    raise ValueError('invalid event time')
+            if (event['last_observed_at'] < event['started_at'] or
+                    event['ended_at'] is not None and event['ended_at'] < event['last_observed_at']):
+                raise ValueError('invalid event interval')
+        if card['state'] == 'suspected_idle' and not events:
+            raise ValueError('idle event missing')
         if data['finished_at'] is None and (not isinstance(card['observed_at'], (int, float))
                 or not 0 <= now - card['observed_at'] <= 2 * number(data['interval'], 15, .1, 300)):
             card.update(state='unknown', reason='sample_expired')
@@ -644,26 +669,33 @@ def run(args):
     if os.environ.get('TASKQUEUE_INSIDE') != '1' or os.environ.get('TASK_DEVICE') != args.devices:
         raise ValueError('sampling requires the matching queue allocation')
     devices = args.devices.split(',')
-    if not 0 < len(devices) <= MAX_DEVICES or any(not d.isdigit() for d in devices):
+    if any(not d.isdigit() for d in devices):
         raise ValueError('invalid allocated devices')
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
-    sampler = Sampler(devices, interval=number(args.interval, 15, .1, 300),
-                      timeout=number(args.timeout, 2, .05, 5),
-                      grace=number(args.grace, 60, 0, 3600),
-                      threshold=number(args.threshold, 120, .1, 3600),
-                      round_timeout=number(args.round_timeout, 6, .1, 10),
-                      guard_dir=Path(args.output).parent.parent / 'probe-locks')
+    if not command:
+        raise ValueError('workload command required')
+    sampler = None
+    if len(devices) <= MAX_DEVICES:
+        sampler = Sampler(devices, interval=number(args.interval, 15, .1, 300),
+                          timeout=number(args.timeout, 2, .05, 5),
+                          grace=number(args.grace, 60, 0, 3600),
+                          threshold=number(args.threshold, 120, .1, 3600),
+                          round_timeout=number(args.round_timeout, 6, .1, 10),
+                          guard_dir=Path(args.output).parent.parent / 'probe-locks')
+    else:
+        print(f'[taskqueue] device telemetry disabled: more than {MAX_DEVICES} allocated devices', file=sys.stderr)
     fd = None
-    try:
-        fd = os.open(args.output, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
-            raise ValueError('unsafe telemetry output')
-    except (OSError, ValueError) as exc:
-        if fd is not None:
-            os.close(fd)
-        fd = None
-        print('[taskqueue] device telemetry unavailable: ' + str(exc), file=sys.stderr)
+    if sampler is not None:
+        try:
+            fd = os.open(args.output, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_nlink != 1:
+                raise ValueError('unsafe telemetry output')
+        except (OSError, ValueError) as exc:
+            if fd is not None:
+                os.close(fd)
+            fd = None
+            print('[taskqueue] device telemetry unavailable: ' + str(exc), file=sys.stderr)
     workload = subprocess.Popen(command, close_fds=True)
     interrupted = None
 
@@ -694,7 +726,8 @@ def run(args):
                     fd = None
             time.sleep(.05)
     finally:
-        sampler.probes.stop()
+        if sampler is not None:
+            sampler.probes.stop()
         if fd is not None:
             try:
                 write_snapshot(fd, sampler.snapshot(args.task_id, args.user, time.monotonic(), final=True))

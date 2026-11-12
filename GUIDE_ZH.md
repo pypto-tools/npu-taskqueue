@@ -340,6 +340,7 @@ task-submit --stats --days 7
 展示疑似空闲卡时、有效覆盖率及事件数。记录在 `state/usage/tasks/`，保留每卡最近
 16 条事件和累计计数、时长；管理员清理时移除 35 天前的采样记录。旧独立采样
 timer 已退役，历史 CSV 仍可读取。skill 的发现与安装见 README 末尾说明。
+采样器单次支持最多 64 张卡；超过范围时仅关闭采样，原任务和退出码不受影响。
 
 ## 用户采样排名
 
@@ -356,3 +357,5 @@ task-submit --usage-ranking --days 7 --sort utilization --json
 不可用记录会提示跳过；按任务开始时间筛选，不代表整机所有任务的实际利用率。
 JSON 接口返回 `schema_version`、`status` 和 `ranking`，只公开用户级汇总，不包含
 任务命令、环境或单条事件。排名仅供参考；原有 `--stats` 的个人查看范围不变。
+每次有效采样取 AI Core、AI Vector、AI CPU、AI Cube 和 NPU 利用率中已识别指标
+的最大值，不包含 HBM 占用和控制 CPU 使用率。坏记录会跳过，不中断整个排名。
