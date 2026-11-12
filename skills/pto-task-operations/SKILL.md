@@ -96,6 +96,28 @@ integration test.
 
 ## Operate safely
 
+### Split preparation from device execution
+
+Before submitting, inspect the command and the scripts it invokes for implicit
+builds, dependency installation, input generation, and report generation. Run
+CPU-only preparation locally first and check its exit status; use `--no-device`
+when preparation must be queued. Submit the prepared artifact with the smallest
+required allocation, wait for that runtime task, then summarize results outside
+the allocation. For example, when the project's documented commands support it:
+
+```bash
+cmake --build build -j 8 &&
+  task-submit --device auto --run './build/onboard_test --device "$TASK_DEVICE"'
+# Run the project's report command after the device task completes.
+```
+
+Use the project's real build/run options. Do not invent a compile-only or
+run-only flag. If JIT compilation cannot be separated, explain that limitation;
+do not claim the compilation has moved outside the allocation. Architecture
+prechecks, npu-smi, DCMI and ACL initialization access devices and belong inside
+the same allocated job as the runtime test, even if they look like preparation.
+Never run a hardware query from the submitter shell or a `--no-device` task.
+
 ### Keep device tasks to one onboard case
 
 Use a device allocation only for the runtime execution of one independent
@@ -127,11 +149,23 @@ Omitting `--ptoas` preserves the submitter's existing `PTOAS_ROOT` and `PATH`.
 A non-empty exported `PTOAS_ROOT` also takes precedence over a conflicting
 `--ptoas`, in which case the client leaves both variables unchanged.
 
-Use `pto-task --stats --days 7` for read-only usage reporting. Sampling is
-independent of the daemon and disabled by default. Set
-`USAGE_SAMPLING_ENABLED=true` in `<root>/config/taskqueue.conf` to enable it;
-rerun `sudo bash setup.sh` to install and enable its timer. The task daemon does
-not need a restart.
+Use `pto-task --stats --days 7` for read-only usage reporting. With
+`USAGE_SAMPLING_ENABLED=true` in the administrator's `config/taskqueue.conf`,
+new device jobs sample their own cards after acquiring the device locks. The
+standalone sampling timer is retired. Activating updated daemon code follows
+the existing idle deployment procedure; changing this flag requires a reload
+or restart. Do not enable a collector or deploy merely to inspect telemetry.
+
+Use `task-submit --device-usage TASK_ID` or append `--json` to inspect current
+and retained telemetry. `--list` annotates sampled running tasks; `--status`
+keeps its existing machine-readable states. Zero computation utilization after
+a 60-second startup grace must persist through 120 seconds of valid samples
+before a card is marked suspected idle. Sampling defaults to every 15 seconds.
+Timeouts, unsupported formats, missing values and stale samples are unknown,
+never idle. Multi-card tasks are assessed per card. Records are advisory, may
+be written by the submitter, and must not trigger automatic cancellation or
+resource release. A3 and A5 use different mapping/query formats: never infer
+a mapping by dividing card IDs by two or treating a logic ID as a physical ID.
 
 For archived daily server usage, use `task-submit --usage status` and
 `sudo task-submit --usage day --date YYYY-MM-DD`. The archive is administrator

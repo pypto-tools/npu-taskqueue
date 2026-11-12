@@ -226,23 +226,70 @@ privileged. Restart the daemon after changing this setting.
 ## NPU usage statistics
 
 `pto-task --stats [--days N]` (or `task-submit --stats`) reports task count,
-card-hours, and sampled NPU utilization. An unprivileged caller sees only their
-own records; root sees the per-user aggregate. The report is read-only. Its
-sampler is an independent timer; it only reads NPU utilization for cards owned
-by running queue tasks and never participates in scheduling.
+card-hours and legacy sampled utilization, plus a separate in-task telemetry
+table: suspected idle card-hours, valid coverage, average computation utilization,
+valid samples and idle-event count. The telemetry table selects tasks by their
+start time; original task accounting retains its overlapping-time-window rules.
+Ordinary users see their own telemetry; root sees all users.
 
-Sampling and its timer are disabled by default. Enable it in the local
-configuration, then rerun `sudo bash setup.sh` to install and enable the timer;
-the task daemon does not need a restart:
+Sampling is opt-in in the administrator-owned local configuration:
 
 ```bash
 # /home/pypto-tools/pto-task/config/taskqueue.conf
 USAGE_SAMPLING_ENABLED=true
+USAGE_SAMPLE_INTERVAL=15
+USAGE_SAMPLE_TIMEOUT=2
+USAGE_SAMPLE_ROUND_TIMEOUT=6
+USAGE_IDLE_GRACE=60
+USAGE_IDLE_SECONDS=120
 ```
 
-Samples are stored in `state/usage/YYYYMMDD.csv`. The sampler uses a per-run
-lock and a timeout for every `npu-smi` call, so a stalled device cannot block
-the queue daemon.
+Deploy the updated code through the normal idle activation procedure. The daemon
+reads sampling configuration on startup/reload, and new jobs use those settings.
+Sampling now runs **inside each device job after acquiring its locks**, only for
+allocated cards. CPU-only jobs never start a probe. Setup retires the old standalone
+timer; its compatibility entry point performs no hardware queries. Old CSV samples
+remain readable by `--stats`.
+
+```bash
+task-submit --device-usage TASK_ID
+task-submit --device-usage TASK_ID --json
+task-submit --list
+```
+
+Each card is marked **suspected idle** only after the startup grace and a
+continuous interval of successful zero-computation samples. A single nonzero
+compute metric prevents the mark. HBM occupancy is auxiliary, not proof of active
+computation. Activity closes the event; missing/invalid data, timeouts and sampling
+gaps also close it at the last confirmed observation and become unknown. Short
+jobs need not produce an idle event. These are sampled observations, not proof
+that no kernel ran between samples. No task is killed and no allocation released
+based on telemetry. Submitters can modify their own advisory telemetry; it is
+separate from authoritative card-time accounting and scheduling.
+
+Queries are polled without blocking the workload, with at most two probes per
+job, a per-query deadline (2 seconds by default, at most 5), a one-second SIGTERM
+allowance before SIGKILL, and a round deadline (6 seconds by default, at most 10).
+Failed devices back off up to 300 seconds. A probe stuck in uninterruptible driver
+sleep cannot be guaranteed to die: it retains its probe slot, and task completion
+never waits indefinitely for it. A separate shared probe guard also prevents later
+jobs from spawning replacements while a stuck query still holds that guard.
+Probes inherit no scheduler device-lock descriptors.
+
+A3/legacy formats use a verified physical-ID remap and `usages -i N -c C`.
+Ascend 950/A5 physical-ID tables use their explicit `Chip Phy-ID` mapping and
+`usages -i N` without `-c`. Logic IDs are never assumed to be physical IDs, and
+unrecognized hardware/driver formats remain unknown. These output formats are
+covered with fixtures; a new platform still requires validation against its
+actual driver output. See Huawei's [physical-ID remap reference](https://www.hiascend.com/document/detail/zh/Atlas%20200I%20A2/253RC1/re/npu/npusmi_059.html)
+and the [950 mapping/query implementation in SwanLab](https://github.com/SwanHubX/SwanLab/blob/main/swanlab/sdk/internal/probe_python/hardware_vendor/accelerator/huawei.py).
+
+Records live in `state/usage/tasks/TASK_ID.json`, with task/user/device identity,
+timestamps, per-card totals and the most recent 16 events per card. Event counts
+and cumulative durations include older events too. Records survive normal task
+cleanup; administrator `--clean` removes telemetry older than 35 days. Interrupted
+or crashed samplers may leave incomplete records; live samples expire after two
+sampling intervals instead of claiming continued activity or idle time.
 
 ### Public card-hour monitoring (development preview)
 
@@ -385,3 +432,15 @@ idle-only installation and activation.
 
 For a concise Chinese usage guide, see [GUIDE_ZH.md](GUIDE_ZH.md). AI agents
 can use [skills/pto-task-operations/SKILL.md](skills/pto-task-operations/SKILL.md).
+Make the directory discoverable in each assistant's skill location, for example:
+
+```bash
+mkdir -p ~/.codex/skills ~/.claude/skills
+ln -s /absolute/path/to/npu-taskqueue/skills/pto-task-operations ~/.codex/skills/pto-task-operations
+ln -s /absolute/path/to/npu-taskqueue/skills/pto-task-operations ~/.claude/skills/pto-task-operations
+```
+
+If a shared host has a canonical skills directory, keep the skill there and link
+the assistant-specific entries to it instead. Installation does not overwrite an
+existing skill or edit user-specific assistant configuration. Assistants without
+a skill discovery mechanism can read `SKILL.md` directly.
