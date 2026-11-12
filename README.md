@@ -294,6 +294,33 @@ cleanup; administrator `--clean` removes telemetry older than 35 days. Interrupt
 or crashed samplers may leave incomplete records; live samples expire after two
 sampling intervals instead of claiming continued activity or idle time.
 
+### User sampling rankings
+
+Ordinary users can read aggregate rankings without root or a device allocation:
+
+```bash
+task-submit --usage-ranking
+task-submit --usage-ranking --days 7 --sort coverage --limit 20
+task-submit --usage-ranking --days 7 --sort utilization --json
+```
+
+The default is the top 20 users over seven days, sorted by mean computation
+utilization descending. `--sort coverage` selects valid sampling coverage;
+`--limit` accepts 1–100 and `--days 0` includes all retained records. Both metrics,
+valid/total sample counts, recorded card-seconds, suspected idle card-seconds and
+task/event counts appear in JSON. Utilization is weighted by valid sample count;
+coverage is valid sampled intervals divided by recorded card duration. Missing
+utilization is `null` and unranked, never zero. Tasks are selected by start time,
+as in the telemetry table. This summarizes sampled, readable records, not every
+allocation on the host; unreadable/incomplete records are counted as skipped.
+
+The interface only reads stored telemetry and publishes user aggregates; no
+task IDs, commands, environments, individual events or login information are
+included. `--stats` retains its existing own-user restriction for ordinary
+callers. Rankings remain advisory because submitters can modify their own
+telemetry. JSON uses `schema_version: 1`, reports completeness with `status`,
+and returns the rows in `ranking`.
+
 ### Public card-hour monitoring (development preview)
 
 `task-submit --usage-monitor --json` provides per-user card usage for today,

@@ -514,41 +514,116 @@ def read_snapshot(state, task_id, now=None):
         for key in ('idle_seconds', 'valid_seconds', 'samples', 'valid_samples', 'compute_sum', 'event_count'):
             if not isinstance(card[key], (int, float)) or not math.isfinite(card[key]) or not 0 <= card[key] <= 10**12:
                 raise ValueError('invalid telemetry totals')
+        if (card['valid_samples'] > card['samples'] or
+                card['compute_sum'] > 100 * card['valid_samples'] + .001 or
+                card['idle_seconds'] > card['valid_seconds'] + .001):
+            raise ValueError('inconsistent telemetry totals')
         if data['finished_at'] is None and (not isinstance(card['observed_at'], (int, float))
                 or not 0 <= now - card['observed_at'] <= 2 * number(data['interval'], 15, .1, 300)):
             card.update(state='unknown', reason='sample_expired')
     return data
 
 
-def report(state, days):
-    totals = {}
-    now = time.time()
-    for path in sorted((state / 'usage/tasks').glob('task_*.json')):
+def records(state, now):
+    # Stream history so ranking memory grows with users, not task/event count.
+    quality = {'skipped_records': 0}
+
+    def scan():
         try:
-            data = read_snapshot(state, path.stem, now)
-            if os.geteuid() != 0 and data['user'] != pwd.getpwuid(os.geteuid()).pw_name:
-                continue
-            if days and data['started_at'] < now - days * 86400:
-                continue
-            values = totals.setdefault(data['user'], [0., 0., 0., 0., 0., 0.])
-            elapsed = max(0, (data['finished_at'] or min(now, data['updated_at'])) - data['started_at'])
-            for card in data['devices'].values():
-                values[0] += card['idle_seconds']
-                values[1] += card['valid_seconds']
-                values[2] += elapsed
-                values[3] += card['compute_sum']
-                values[4] += card['valid_samples']
-                values[5] += card['event_count']
-        except (OSError, ValueError, KeyError, TypeError):
+            with os.scandir(state / 'usage/tasks') as entries:
+                for entry in entries:
+                    if not entry.name.startswith('task_') or not entry.name.endswith('.json'):
+                        continue
+                    try:
+                        yield read_snapshot(state, entry.name[:-5], now)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        quality['skipped_records'] += 1
+        except FileNotFoundError:
+            return
+        except OSError:
+            quality['skipped_records'] += 1
+    return scan(), quality
+
+
+def aggregate(snapshots, days, now, user=None):
+    """Weight utilization by valid sample count and coverage by card duration."""
+    totals = {}
+    for data in snapshots:
+        if user is not None and data['user'] != user:
             continue
+        if days and data['started_at'] < now - days * 86400:
+            continue
+        row = totals.setdefault(data['user'], dict(user=data['user'], task_count=0,
+            suspected_idle_card_seconds=0., valid_card_seconds=0., recorded_card_seconds=0.,
+            compute_sum=0., valid_samples=0, total_samples=0, idle_events=0))
+        row['task_count'] += 1
+        elapsed = max(0, (data['finished_at'] or min(now, data['updated_at'])) - data['started_at'])
+        for card in data['devices'].values():
+            row['suspected_idle_card_seconds'] += card['idle_seconds']
+            row['valid_card_seconds'] += card['valid_seconds']
+            row['recorded_card_seconds'] += elapsed
+            row['compute_sum'] += card['compute_sum']
+            row['valid_samples'] += card['valid_samples']
+            row['total_samples'] += card['samples']
+            row['idle_events'] += card['event_count']
+    for row in totals.values():
+        row['mean_compute_utilization_pct'] = (row.pop('compute_sum') / row['valid_samples']
+                                               if row['valid_samples'] else None)
+        row['valid_coverage_pct'] = (min(100., 100 * row['valid_card_seconds'] / row['recorded_card_seconds'])
+                                     if row['recorded_card_seconds'] else None)
+    return list(totals.values())
+
+
+def report(state, days):
+    now = time.time()
+    snapshots, _ = records(state, now)
+    user = None if os.geteuid() == 0 else pwd.getpwuid(os.geteuid()).pw_name
+    rows = aggregate(snapshots, days, now, user)
     print('\n作业内采样（按任务开始时间筛选；疑似空闲仅供参考）')
     print('用户                疑似空闲卡时(h)  有效覆盖率  平均计算利用率  有效样本  空闲事件')
-    for user, (idle, valid, elapsed, compute, count, events) in sorted(totals.items()):
-        coverage = f'{min(100, 100 * valid / elapsed):.1f}%' if elapsed else '-'
-        utilization = f'{compute / count:.1f}%' if count else '-'
-        print(f'{user:20s} {idle / 3600:10.3f} {coverage:>10s} {utilization:>12s} {int(count):8d} {int(events):8d}')
-    if not totals:
+    for row in sorted(rows, key=lambda row: row['user']):
+        coverage = percent(row['valid_coverage_pct'])
+        utilization = percent(row['mean_compute_utilization_pct'])
+        print(f"{row['user']:20s} {row['suspected_idle_card_seconds'] / 3600:10.3f} "
+              f"{coverage:>10s} {utilization:>12s} {int(row['valid_samples']):8d} {int(row['idle_events']):8d}")
+    if not rows:
         print('(无作业内采样记录)')
+
+
+def percent(value):
+    return '-' if value is None else f'{value:.1f}%'
+
+
+def ranking(state, days=7, sort='utilization', limit=20):
+    now = time.time()
+    snapshots, quality = records(state, now)
+    # Public aggregates are intentionally separate from --stats' own-user view.
+    # No task IDs, commands, environments, per-card events or sessions are emitted.
+    rows = aggregate(snapshots, days, now)
+    skipped = quality['skipped_records']
+    key = 'mean_compute_utilization_pct' if sort == 'utilization' else 'valid_coverage_pct'
+    rows.sort(key=lambda row: (row[key] is None, -(row[key] or 0), row['user']))
+    for index, row in enumerate(rows, 1):
+        row['rank'] = index if row[key] is not None else None
+    return dict(schema_version=1, status='partial' if skipped else 'ok' if rows else 'empty',
+                advisory=True, generated_at=now, days=days, window_basis='task_started_at',
+                coverage_basis='recorded_card_seconds', sort=sort, order='descending',
+                total_users=len(rows), skipped_records=skipped, ranking=rows[:limit])
+
+
+def print_ranking(data):
+    metric = '平均计算利用率' if data['sort'] == 'utilization' else '有效采样覆盖率'
+    print(f'采样排名（按用户；{metric}降序；按任务开始时间筛选；仅供参考）')
+    print('名次  用户                  平均计算利用率  有效覆盖率  有效样本  疑似空闲卡时(h)')
+    for row in data['ranking']:
+        rank = '-' if row['rank'] is None else str(row['rank'])
+        print(f"{rank:>4s}  {row['user']:20s} {percent(row['mean_compute_utilization_pct']):>12s} "
+              f"{percent(row['valid_coverage_pct']):>10s} {int(row['valid_samples']):8d} "
+              f"{row['suspected_idle_card_seconds'] / 3600:14.3f}")
+    if not data['ranking']:
+        print('(未启用采样或暂无可用记录)')
+    if data['skipped_records']:
+        print(f"跳过 {data['skipped_records']} 条不可用记录，排名可能不完整。")
 
 
 def describe(data):
@@ -652,6 +727,12 @@ def main():
     stats = commands.add_parser('stats')
     stats.add_argument('state', type=Path)
     stats.add_argument('days', type=int)
+    ranks = commands.add_parser('ranking', help='read public per-user sampling aggregates')
+    ranks.add_argument('state', type=Path)
+    ranks.add_argument('--days', type=int, default=7)
+    ranks.add_argument('--sort', choices=('utilization', 'coverage'), default='utilization')
+    ranks.add_argument('--limit', type=int, default=20)
+    ranks.add_argument('--json', action='store_true')
     args = parser.parse_args()
     try:
         if args.mode == 'prepare':
@@ -665,6 +746,12 @@ def main():
             if args.days < 0:
                 raise ValueError('days must be nonnegative')
             report(args.state, args.days)
+            return 0
+        if args.mode == 'ranking':
+            if args.days < 0 or not 1 <= args.limit <= 100:
+                raise ValueError('days must be nonnegative; limit must be between 1 and 100')
+            data = ranking(args.state, args.days, args.sort, args.limit)
+            print(json.dumps(data, allow_nan=False)) if args.json else print_ranking(data)
             return 0
         data = read_snapshot(args.state, args.task_id)
         print(json.dumps(data) if args.json else describe(data))

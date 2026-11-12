@@ -182,6 +182,8 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
   task-submit --timeout N --wait <task-id>     自定义排队超时(秒，默认 600)
   task-submit --status <task-id>               查看任务状态
   task-submit --device-usage <task-id> [--json] 查看设备采样和疑似空闲记录
+  task-submit --usage-ranking [--days N] [--sort utilization|coverage] [--limit N] [--json]
+                                             查看用户采样排名（默认近 7 天、利用率降序）
   task-submit --log <task-id>                  查看任务日志（已完成或运行中）
   task-submit --usage-monitor --json             只读卡时快照（今日、7天、30天）
   task-submit --stats [--days N]               查看 NPU 使用统计（默认近 7 天）
@@ -300,7 +302,7 @@ while [[ "${1:-}" == --* || "${1:-}" == "-i" ]]; do
             PTOAS_VERSION="$2"; shift 2 ;;
         --max-time) MAX_TIME="$2"; shift 2 ;;
         # 子命令：不在此处消费，留给下面的主 case 分派
-        --version|--device-usage|--wait|--status|--log|--cancel|--kill|--list|--clean|--maintenance|--devices|--find|--stats|--usage|--help|-h)
+        --version|--device-usage|--usage-ranking|--wait|--status|--log|--cancel|--kill|--list|--clean|--maintenance|--devices|--find|--stats|--usage|--help|-h)
             break ;;
         # 未知选项必须硬失败。此处曾是 `*) break`，会把未识别的 flag 连同其后的
         # --run/--timeout 一起当作任务命令提交，且 RUN_MODE 未置位时静默 exit 0
@@ -2161,6 +2163,9 @@ case "${1:-}" in
     --device-usage)
         [[ -z "${2:-}" ]] && usage
         exec python3 -I "$SCRIPT_DIR/device_usage.py" read "$STATE_DIR" "$2" "${@:3}"
+        ;;
+    --usage-ranking)
+        exec python3 -I "$SCRIPT_DIR/device_usage.py" ranking "$STATE_DIR" "${@:2}"
         ;;
     --status)
         [[ -z "${2:-}" ]] && usage

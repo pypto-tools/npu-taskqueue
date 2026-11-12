@@ -167,6 +167,13 @@ be written by the submitter, and must not trigger automatic cancellation or
 resource release. A3 and A5 use different mapping/query formats: never infer
 a mapping by dividing card IDs by two or treating a logic ID as a physical ID.
 
+Use `task-submit --usage-ranking [--days N] [--sort utilization|coverage] [--json]`
+for public per-user sampling aggregates. It is read-only and requires no device
+allocation. The default order is mean computation utilization descending;
+coverage and sample counts explain incomplete evidence. Unknown utilization is
+unranked, not zero. These advisory rankings include only readable sampled tasks,
+selected by start time, and do not expose commands or individual task records.
+
 For archived daily server usage, use `task-submit --usage status` and
 `sudo task-submit --usage day --date YYYY-MM-DD`. The archive is administrator
 only because it contains user sessions. `USAGE_REPORT_ENABLED` defaults to

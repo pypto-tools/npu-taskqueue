@@ -278,6 +278,24 @@ else:
                        capture_output=True, timeout=3)
         self.assertEqual(self.trace.read_text(), previous)
 
+    def test_public_ranking_cli_is_read_only(self):
+        self.execute(['sleep', '.8'])
+        before = self.trace.read_text()
+        config = self.root / 'ranking.conf'
+        config.write_text('STATE_DIR=' + str(self.state) + '\n')
+        env = dict(self.env, TASKQUEUE_CONF=str(config))
+        env.pop('TASKQUEUE_INSIDE', None)
+        for metric in ('utilization', 'coverage'):
+            result = subprocess.run(['bash', str(REPO / 'task-submit.sh'), '--usage-ranking',
+                                     '--days', '0', '--sort', metric, '--json'],
+                                    env=env, capture_output=True, text=True, timeout=3)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            data = json.loads(result.stdout)
+            self.assertEqual(data['sort'], metric)
+            self.assertEqual(data['ranking'][0]['user'], self.user)
+            self.assertNotIn(self.task, result.stdout)
+        self.assertEqual(self.trace.read_text(), before)
+
     def test_unknown_mapping_never_queries_wrong_card(self):
         result = self.execute(['sleep', '.7'], TABLE='Unsupported driver output')
         self.assertEqual(result.returncode, 0)
@@ -391,6 +409,64 @@ else:
             except subprocess.TimeoutExpired:
                 daemon.kill()
                 daemon.wait(timeout=2)
+
+
+class RankingTests(unittest.TestCase):
+    def snapshot(self, user, duration=100, samples=10, compute=50, coverage=.5, age=0):
+        now = 1_000_000
+        return dict(user=user, task_id='task_private_id', command='private command',
+                    started_at=now - duration - age, updated_at=now - age, finished_at=now - age,
+                    devices={'12': dict(idle_seconds=0., valid_seconds=duration * coverage,
+                        compute_sum=samples * compute, valid_samples=samples, samples=samples,
+                        event_count=0)})
+
+    def test_weighted_ranking_and_unknown_last(self):
+        snapshots = [self.snapshot('alice', samples=10, compute=100, coverage=1),
+                     self.snapshot('alice', duration=900, samples=90, compute=0, coverage=0),
+                     self.snapshot('bob', samples=20, compute=50),
+                     self.snapshot('unknown', samples=0)]
+        with mock.patch.object(usage, 'records', return_value=(snapshots, {'skipped_records': 0})), \
+             mock.patch.object(usage.time, 'time', return_value=1_000_000):
+            data = usage.ranking(Path('/unused'), days=0)
+        self.assertEqual([row['user'] for row in data['ranking']], ['bob', 'alice', 'unknown'])
+        self.assertEqual(data['ranking'][1]['mean_compute_utilization_pct'], 10)
+        self.assertEqual(data['ranking'][1]['valid_coverage_pct'], 10)
+        self.assertIsNone(data['ranking'][2]['mean_compute_utilization_pct'])
+        self.assertIsNone(data['ranking'][2]['rank'])
+        self.assertNotIn('private command', json.dumps(data))
+        self.assertNotIn('task_private_id', json.dumps(data))
+
+    def test_coverage_sort_limit_and_window(self):
+        snapshots = [self.snapshot('alice', compute=10, coverage=.9),
+                     self.snapshot('bob', compute=90, coverage=.2),
+                     self.snapshot('older', age=8*86400, compute=100, coverage=1)]
+        with mock.patch.object(usage, 'records', return_value=(snapshots, {'skipped_records': 1})), \
+             mock.patch.object(usage.time, 'time', return_value=1_000_000):
+            data = usage.ranking(Path('/unused'), days=7, sort='coverage', limit=1)
+        self.assertEqual(data['total_users'], 2)
+        self.assertEqual(len(data['ranking']), 1)
+        self.assertEqual(data['ranking'][0]['user'], 'alice')
+        self.assertEqual(data['status'], 'partial')
+        self.assertEqual(data['skipped_records'], 1)
+
+    def test_stats_filter_stays_separate_from_public_ranking(self):
+        snapshots = [self.snapshot('alice'), self.snapshot('bob')]
+        rows = usage.aggregate(snapshots, 0, 1_000_000, user='alice')
+        self.assertEqual([row['user'] for row in rows], ['alice'])
+        self.assertEqual(len(usage.aggregate(snapshots, 0, 1_000_000)), 2)
+
+    def test_empty_ranking_and_deterministic_ties(self):
+        with mock.patch.object(usage, 'records', return_value=([], {'skipped_records': 0})):
+            data = usage.ranking(Path('/unused'))
+        self.assertEqual(data['status'], 'empty')
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            usage.print_ranking(data)
+        self.assertIn('暂无', captured.getvalue())
+        with mock.patch.object(usage, 'records', return_value=(
+                [self.snapshot('bob'), self.snapshot('alice')], {'skipped_records': 0})), \
+             mock.patch.object(usage.time, 'time', return_value=1_000_000):
+            data = usage.ranking(Path('/unused'), days=0)
+        self.assertEqual([row['user'] for row in data['ranking']], ['alice', 'bob'])
 
 
 if __name__ == '__main__':

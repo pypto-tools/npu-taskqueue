@@ -340,3 +340,19 @@ task-submit --stats --days 7
 展示疑似空闲卡时、有效覆盖率及事件数。记录在 `state/usage/tasks/`，保留每卡最近
 16 条事件和累计计数、时长；管理员清理时移除 35 天前的采样记录。旧独立采样
 timer 已退役，历史 CSV 仍可读取。skill 的发现与安装见 README 末尾说明。
+
+## 用户采样排名
+
+```bash
+task-submit --usage-ranking
+task-submit --usage-ranking --days 7 --sort coverage --limit 20
+task-submit --usage-ranking --days 7 --sort utilization --json
+```
+
+普通用户可直接查询，不需要 root 或申请卡。默认近 7 天、平均计算利用率降序，
+也支持按有效采样覆盖率排序，展示有效样本数、疑似空闲时长等；`--days 0` 查看
+全部保留记录，`--limit` 为 1–100。利用率按有效样本数加权，覆盖率按记录的占卡
+时长加权；无有效样本的利用率为未知，不当作零。仅汇总有可读采样记录的用户，
+不可用记录会提示跳过；按任务开始时间筛选，不代表整机所有任务的实际利用率。
+JSON 接口返回 `schema_version`、`status` 和 `ranking`，只公开用户级汇总，不包含
+任务命令、环境或单条事件。排名仅供参考；原有 `--stats` 的个人查看范围不变。
