@@ -485,6 +485,7 @@ install_app_file "$SCRIPT_DIR/pto-task-stats.sh" "$APP_DIR/pto-task-stats" 755
 install_app_file "$SCRIPT_DIR/usage_report.py" "$APP_DIR/usage_report.py" 755
 install_app_file "$SCRIPT_DIR/monitor.py" "$APP_DIR/monitor.py" 644
 install_app_file "$SCRIPT_DIR/usage_monitor.py" "$APP_DIR/usage_monitor.py" 755
+install_app_file "$SCRIPT_DIR/device_usage.py" "$APP_DIR/device_usage.py" 644
 for usage_monitor_unit in pto-task-usage-monitor.{service,timer}; do
     rendered_unit="$(sed "s|/home/pypto-tools/pto-task/app|$APP_DIR|g" "$SCRIPT_DIR/$usage_monitor_unit")"
     write_app_file "$APP_DIR/$usage_monitor_unit" 644 "$rendered_unit"$'\n'
@@ -746,16 +747,10 @@ if [[ -f "$CONFIG_FILE" && "$(id -u)" -eq 0 ]]; then
         *) systemctl disable --now pto-task-usage-monitor.timer >/dev/null 2>&1 || true
            rm -f /etc/systemd/system/pto-task-usage-monitor.{service,timer} ;;
     esac
-    case "$usage_sampling_enabled" in
-        1|true|TRUE|yes|YES|on|ON)
-            ln -sfn "$APP_DIR/pto-task-usage-sampler.service" /etc/systemd/system/pto-task-usage-sampler.service
-            ln -sfn "$APP_DIR/pto-task-usage-sampler.timer" /etc/systemd/system/pto-task-usage-sampler.timer
-            ;;
-        *)
-            systemctl disable --now pto-task-usage-sampler.timer >/dev/null 2>&1 || true
-            rm -f /etc/systemd/system/pto-task-usage-sampler.service /etc/systemd/system/pto-task-usage-sampler.timer
-            ;;
-    esac
+    # Hardware probes now belong to allocated jobs, never an independent timer.
+    # Preserve the enable flag and existing CSV history.
+    systemctl disable --now pto-task-usage-sampler.timer pto-task-usage-sampler.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/pto-task-usage-sampler.service /etc/systemd/system/pto-task-usage-sampler.timer
     case "$usage_report_enabled" in
         1|true|TRUE|yes|YES|on|ON)
             for usage_report_unit in pto-task-usage-report-{collect,publish}.{service,timer}; do
@@ -789,11 +784,9 @@ if [[ -f "$CONFIG_FILE" && "$(id -u)" -eq 0 ]]; then
     fi
     case "$usage_sampling_enabled" in
         1|true|TRUE|yes|YES|on|ON)
-            systemctl enable --now pto-task-usage-sampler.timer
-            services_started=true
-            printf 'Usage sampling timer enabled.\n'
+            printf 'In-task usage sampling enabled; activate the updated daemon when idle.\n'
             ;;
-        *) printf 'Usage sampling timer not enabled (USAGE_SAMPLING_ENABLED is false).\n' ;;
+        *) printf 'In-task usage sampling disabled (USAGE_SAMPLING_ENABLED is false).\n' ;;
     esac
     case "$usage_report_enabled" in
         1|true|TRUE|yes|YES|on|ON)

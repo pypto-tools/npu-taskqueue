@@ -21,7 +21,10 @@ files=()
 for f in "$STATE_DIR/done"/task_* "$STATE_DIR/running"/task_* "$STATE_DIR/usage"/*.csv; do
     [[ -f "$f" && -r "$f" && "$f" != *.env ]] && files+=("$f")
 done
-[[ ${#files[@]} -gt 0 ]] || { echo '(无任务记录)'; exit 0; }
+if [[ ${#files[@]} -eq 0 ]]; then
+    echo '(无任务记录)'
+    exec python3 -I "$APP_DIR/device_usage.py" stats "$STATE_DIR" "$days"
+fi
 now=$(date +%s)
 report_user="$(id -un)"
 [[ "$(id -u)" -eq 0 ]] && report_user=""
@@ -40,3 +43,6 @@ FNR==1 { flush(); have=1; user="?"; submit=start=finish=dev="" }
 /^SUBMIT_USER=/ {user=value()} /^SUBMIT_TIME=/ {submit=value()} /^START_TIME=/ {start=value()} /^FINISH_TIME=/ {finish=value()} /^DEVICE=/ {dev=value()}
 END { flush(); printf "总卡时: %.1f h\n\n", total/3600; printf "%-16s %6s %10s %10s %8s\n", "用户","任务","卡时(h)","利用率","采样"; for(u in tasks) printf "%-16s %6d %10.1f %9s %8s\n",u,tasks[u],card[u]/3600,(samples[u]?sprintf("%.0f%%",util[u]/samples[u]):"-"),(samples[u]?samples[u]:"-") }
 ' "${files[@]}"
+
+# This separate table includes new in-task probes; legacy CSV totals above remain readable.
+python3 -I "$APP_DIR/device_usage.py" stats "$STATE_DIR" "$days"

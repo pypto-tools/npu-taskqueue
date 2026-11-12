@@ -311,7 +311,7 @@ reload_runtime_config() {
     local old_state="$STATE_DIR"
     local new_max new_cap new_grace
 
-    # 配置由 root 管理。只在信号路径读取三个支持热更新的整数键。
+    # 配置由 root 管理。只在信号路径读取明确支持热更新的键，不执行 shell。
     read_hot_key() {
         local wanted="$1" line value=""
         while IFS= read -r line; do
@@ -331,6 +331,17 @@ reload_runtime_config() {
     [[ "$new_max" =~ ^[1-9][0-9]*$ ]] && MAX_CONCURRENT="$new_max"
     [[ "$new_cap" =~ ^[0-9]+$ ]] && MAX_TIME_HARD_CAP="$new_cap"
     [[ "$new_grace" =~ ^[0-9]+$ ]] && KILL_GRACE="$new_grace"
+    local sample_key sample_value
+    sample_value=$(read_hot_key USAGE_SAMPLING_ENABLED)
+    case "$sample_value" in
+        1|true|TRUE|yes|YES|on|ON|0|false|FALSE|no|NO|off|OFF)
+            USAGE_SAMPLING_ENABLED="$sample_value" ;;
+    esac
+    for sample_key in USAGE_SAMPLE_INTERVAL USAGE_SAMPLE_TIMEOUT USAGE_SAMPLE_ROUND_TIMEOUT \
+                      USAGE_IDLE_GRACE USAGE_IDLE_SECONDS; do
+        sample_value=$(read_hot_key "$sample_key")
+        [[ "$sample_value" =~ ^[0-9]+([.][0-9]+)?$ ]] && printf -v "$sample_key" '%s' "$sample_value"
+    done
     STATE_DIR="$old_state"
     load_runtime_devices
     log "config reloaded: max_concurrent=$MAX_CONCURRENT hard_cap=$MAX_TIME_HARD_CAP kill_grace=$KILL_GRACE"
@@ -621,7 +632,28 @@ run_task() {
     # daemon 统一包装 npu-lock（兼容旧任务：命令已含 npu-lock 则跳过）
     local exec_cmd="bash '$task_script'"
     if [[ -n "$DEVICE" && "$DEVICE" != "none" && "$COMMAND" != *npu-lock* ]]; then
-        exec_cmd="'$SCRIPT_DIR/npu_lock.sh' $DEVICE --timeout 0 -- bash '$task_script'"
+        local sample_cmd="" sample_user="$SUBMIT_USER"
+        [[ "$TASK_EXECUTION_MODE" != root ]] || sample_user=root
+        case "${USAGE_SAMPLING_ENABLED:-false}" in
+            1|true|TRUE|yes|YES|on|ON)
+                # Only the allocated job probes hardware, after npu_lock has
+                # acquired the cards and closed lock FDs in its child.
+                if python3 -I "$SCRIPT_DIR/device_usage.py" prepare "$STATE_DIR" "$task_id" "$sample_user" "$DEVICE"; then
+                    printf -v sample_cmd '%q ' python3 -I "$SCRIPT_DIR/device_usage.py" run \
+                        --output "$STATE_DIR/usage/tasks/$task_id.json" \
+                        --task-id "$task_id" --user "$SUBMIT_USER" --devices "$DEVICE" \
+                        --interval "${USAGE_SAMPLE_INTERVAL:-15}" --timeout "${USAGE_SAMPLE_TIMEOUT:-2}" \
+                        --grace "${USAGE_IDLE_GRACE:-60}" --threshold "${USAGE_IDLE_SECONDS:-120}" \
+                        --round-timeout "${USAGE_SAMPLE_ROUND_TIMEOUT:-6}" -- bash "$task_script"
+                else
+                    log "warning: device telemetry preparation failed for $task_id"
+                fi ;;
+        esac
+        if [[ -n "$sample_cmd" ]]; then
+            exec_cmd="'$SCRIPT_DIR/npu_lock.sh' $DEVICE --timeout 0 -- $sample_cmd"
+        else
+            exec_cmd="'$SCRIPT_DIR/npu_lock.sh' $DEVICE --timeout 0 -- bash '$task_script'"
+        fi
     fi
 
     local task_log="$LOGS_DIR/${task_id}.log"

@@ -14,6 +14,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$REPO_DIR" \
     python3 -m unittest discover -s tests -p 'test_usage*.py'
 PYTHONDONTWRITEBYTECODE=1 \
     python3 -m unittest discover -s tests -p 'test_monitor*.py'
+PYTHONDONTWRITEBYTECODE=1 \
+    python3 -m unittest discover -s tests -p 'test_device_usage.py'
 bash tests/test_usage_install.sh
 bash tests/test_scheduler_core.sh
 bash tests/test_pool_aware_reservation.sh

@@ -378,26 +378,15 @@ fi
 [[ "$(<"$TEST_ROOT/runtime-hardlink-target")" == unchanged-hardlink ]]
 [[ "$(stat -c %a "$TEST_ROOT/runtime-hardlink-target")" == 600 ]]
 
-# Invalid or disabled timeout values must fall back to a finite deadline.
-mkdir -p "$TEST_ROOT/fake-bin" "$REPO_DIR/runtime/state/running" "$REPO_DIR/runtime/state/usage"
-cat >> "$REPO_DIR/runtime/config/taskqueue.conf" <<EOF
-USAGE_SAMPLING_ENABLED=true
-USAGE_SAMPLE_TIMEOUT=0
-EOF
-printf 'SUBMIT_USER=%s\nDEVICE=0\n' "$(id -un)" > "$REPO_DIR/runtime/state/running/task_sampler_test"
-cat > "$TEST_ROOT/fake-bin/timeout" <<EOF
-#!/usr/bin/env bash
-printf '%s' "\$1" > "$TEST_ROOT/timeout-value"
-shift
-exec "\$@"
-EOF
+# Retired standalone timers must never query hardware, even when enabled.
+mkdir -p "$TEST_ROOT/fake-bin"
 cat > "$TEST_ROOT/fake-bin/npu-smi" <<'EOF'
 #!/usr/bin/env bash
-printf 'NPU Utilization: 10\nAicore Usage Rate: 20\nHBM Usage Rate: 30\n'
+exit 99
 EOF
-chmod 755 "$TEST_ROOT/fake-bin/timeout" "$TEST_ROOT/fake-bin/npu-smi"
-PATH="$TEST_ROOT/fake-bin:$PATH" bash "$REPO_DIR/pto-task-usage-sampler.sh"
-[[ "$(<"$TEST_ROOT/timeout-value")" == 5 ]]
+chmod 755 "$TEST_ROOT/fake-bin/npu-smi"
+USAGE_SAMPLING_ENABLED=true PATH="$TEST_ROOT/fake-bin:$PATH" \
+    bash "$REPO_DIR/pto-task-usage-sampler.sh"
 
 if bash "$REPO_DIR/tests/test_layout.sh" >/dev/null 2>&1; then
     echo 'error: layout test did not reject an existing source runtime' >&2
