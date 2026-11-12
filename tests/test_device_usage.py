@@ -25,6 +25,8 @@ spec.loader.exec_module(usage)
 # 950 mapping and no-chip query:
 # https://github.com/SwanHubX/SwanLab/blob/main/swanlab/sdk/internal/probe_python/hardware_vendor/accelerator/huawei.py
 A3_TABLE = 'NPU ID  Chip ID  Chip Logic ID  Chip Name\n3 0 0 Ascend 910\n3 1 1 Ascend 910\n'
+A3_PHYSICAL_TABLE = ('NPU ID  Chip ID  Chip Logic ID  Chip Phy-ID  Chip Name\n'
+                     '7 0 0 11 Ascend910\n7 1 1 12 Ascend910\n7 2 - - Mcu\n')
 A5_TABLE = 'NPU ID  Slot ID  Chip ID  Chip Phy-ID  Chip Name\n7 5 0 12 Ascend950PR\n9 6 0 15 Ascend950DT\n'
 
 
@@ -92,6 +94,8 @@ class ClassificationTests(unittest.TestCase):
 
     def test_platform_mappings(self):
         self.assertIsNone(usage.physical_mapping(A3_TABLE))
+        self.assertEqual(usage.physical_mapping(A3_PHYSICAL_TABLE)['12'],
+                         {'npu': '7', 'chip': '1', 'profile': 'legacy'})
         self.assertEqual(usage.physical_mapping(A5_TABLE)['12'],
                          {'npu': '7', 'chip': None, 'profile': 'ascend950'})
         remap = 'Chip Physical ID: 12\nChip Logic ID: 0\nNPU ID: 7\nChip ID: 1'
@@ -119,8 +123,12 @@ class ClassificationTests(unittest.TestCase):
         probes = usage.Probes(timeout=2, concurrency=1)
         proc = mock.Mock(pid=12345)
         proc.poll.return_value = None  # Models D-state: even SIGKILL has no effect.
-        probes.jobs['inventory'] = dict(proc=proc, output=io.BytesIO(), started=0,
-                                       terminated=None, reported=False)
+        reader, writer = os.pipe()
+        os.close(writer)
+        output = os.fdopen(reader, 'rb')
+        os.set_blocking(reader, False)
+        probes.jobs['inventory'] = dict(proc=proc, output=output, buffer=bytearray(), overflow=False,
+                                       started=0, terminated=None, reported=False)
         with mock.patch.object(usage.os, 'killpg') as signals:
             self.assertEqual(probes.poll(2), [('inventory', '', 'query_timeout')])
             self.assertEqual(probes.poll(3), [])
@@ -159,6 +167,11 @@ for fd in Path('/proc/self/fd').iterdir():
 with open(os.environ['TRACE'], 'a') as stream:
     stream.write(json.dumps(args) + '\\n')
 mode = os.environ.get('PROBE_MODE', 'a3')
+if os.environ.get('EXTRA_DRIVER_LOG'):
+    Path(os.environ['EXTRA_DRIVER_LOG']).write_bytes(b'x' * 131072)
+if mode == 'excess_output':
+    os.write(1, b'x' * 100000)
+    sys.exit(0)
 if mode == 'hang':
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     print(os.getpid(), file=open(os.environ['PROBE_PID'], 'a'), flush=True)
@@ -191,7 +204,7 @@ else:
                               env=env, capture_output=True, text=True, timeout=8)
 
     def test_a3_and_a5_query_correct_card_and_preserve_exit(self):
-        for profile, table in (('a3', A3_TABLE), ('a5', A5_TABLE)):
+        for profile, table in (('a3', A3_TABLE), ('a3', A3_PHYSICAL_TABLE), ('a5', A5_TABLE)):
             with self.subTest(profile=profile):
                 self.trace.unlink(missing_ok=True)
                 result = self.execute(['bash', '-c', 'sleep 1.3; echo result; exit 7'],
@@ -224,6 +237,24 @@ else:
                 time.sleep(.02)
             if Path('/proc', pid, 'stat').exists():
                 self.assertIn(') Z ', Path('/proc', pid, 'stat').read_text())
+
+    def test_driver_log_size_is_not_limited(self):
+        log = self.root / 'driver.log'
+        result = self.execute(['sleep', '.8'], EXTRA_DRIVER_LOG=str(log))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(log.stat().st_size, 131072)
+        data = usage.read_snapshot(self.state, self.task)
+        self.assertGreater(data['devices']['12']['valid_samples'], 0)
+
+    def test_excess_query_output_is_unknown_and_bounded(self):
+        started = time.monotonic()
+        result = self.execute(['sleep', '.8'], PROBE_MODE='excess_output')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLess(time.monotonic() - started, 2)
+        card = usage.read_snapshot(self.state, self.task)['devices']['12']
+        self.assertEqual(card['state'], 'unknown')
+        self.assertEqual(card['reason'], 'query_output_limit')
+        self.assertEqual(card['idle_seconds'], 0)
 
     def test_refuses_sampling_without_matching_allocation(self):
         result = self.execute(['true'], TASK_DEVICE='13')

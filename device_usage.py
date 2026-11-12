@@ -13,12 +13,10 @@ import os
 from pathlib import Path
 import pwd
 import re
-import resource
 import signal
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 
 MAX_BYTES = 256 * 1024
@@ -49,8 +47,8 @@ def fields(output):
 def physical_mapping(output):
     """Ascend 950's table identifies physical devices explicitly.
 
-    Older A3 tables contain Chip Logic ID, which is NOT a physical device ID.
-    Those require phyid-remap for each allocated /dev/davinciN instead.
+    A3 tables may contain both logic and physical columns. Older logic-only
+    tables require phyid-remap for each allocated /dev/davinciN instead.
     """
     lines = [line.strip().strip('|').strip() for line in output.splitlines() if line.strip()]
     header = next((i for i, line in enumerate(lines) if 'NPU ID' in line), None)
@@ -58,20 +56,26 @@ def physical_mapping(output):
         raise ValueError('mapping header missing')
     if 'Chip Logic ID' in lines[header] and 'Chip Phy-ID' not in lines[header]:
         return None
-    if not all(key in lines[header] for key in ('Slot ID', 'Chip ID', 'Chip Phy-ID', 'Chip Name')):
+    is_950 = 'Slot ID' in lines[header]
+    if (not all(key in lines[header] for key in ('Chip ID', 'Chip Phy-ID', 'Chip Name'))
+            or not is_950 and 'Chip Logic ID' not in lines[header]):
         raise ValueError('unsupported mapping format')
     result = {}
     for line in lines[header + 1:]:
         parts = line.replace('|', ' ').split()
         if len(parts) < 5:
             continue
-        npu, slot, chip, physical, *name = parts
-        if not all(x.isdigit() for x in (npu, slot, chip, physical)):
+        if is_950:
+            npu, slot, chip, physical, *name = parts
+        else:
+            npu, chip, logic, physical, *name = parts
+        if not all(x.isdigit() for x in (npu, chip, physical)):
             continue  # MCU rows have no physical ID.
-        if physical in result or not any('950' in x for x in name):
+        if physical in result or not any(('950' if is_950 else '910') in x for x in name):
             raise ValueError('ambiguous or unsupported physical mapping')
         # The 950 usages query addresses the NPU, without legacy -c.
-        result[physical] = {'npu': npu, 'chip': None, 'profile': 'ascend950'}
+        result[physical] = {'npu': npu, 'chip': None if is_950 else chip,
+                            'profile': 'ascend950' if is_950 else 'legacy'}
     if not result:
         raise ValueError('physical mapping empty')
     return result
@@ -183,16 +187,12 @@ class Card:
                 data['state'] = 'zero'
 
 
-def limit_probe_output():
-    resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024, 64 * 1024))
-
-
 class Probes:
     """Nonblocking subprocess pool, including children that ignore SIGKILL.
 
-    Results go to bounded regular files, not pipes. A stuck descendant cannot
-    keep communicate() or a shell command substitution open. A surviving probe
-    consumes its slot; no replacement storm is possible within an allocation.
+    Drain a bounded amount from nonblocking stdout; never wait for pipe EOF or
+    use communicate(). A stuck descendant cannot keep task completion waiting.
+    A surviving probe consumes its slot, preventing replacement storms.
     """
     def __init__(self, timeout=2, concurrency=2, guard_dir=None):
         self.timeout, self.concurrency = timeout, concurrency
@@ -215,23 +215,16 @@ class Probes:
                 os.close(guard)
                 raise
         try:
-            output = tempfile.TemporaryFile()
-        except OSError:
-            if guard is not None:
-                os.close(guard)
-            raise
-        try:
             proc = subprocess.Popen(['npu-smi', 'info', *arguments], stdin=subprocess.DEVNULL,
-                                    stdout=output, stderr=subprocess.DEVNULL, close_fds=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, close_fds=True,
                                     pass_fds=() if guard is None else (guard,),
-                                    start_new_session=True, preexec_fn=limit_probe_output)
-        except OSError:
-            output.close()
-            raise
+                                    start_new_session=True)
         finally:
             if guard is not None:
                 os.close(guard)
-        self.jobs[key] = dict(proc=proc, output=output, started=now, terminated=None, reported=False)
+        os.set_blocking(proc.stdout.fileno(), False)
+        self.jobs[key] = dict(proc=proc, output=proc.stdout, buffer=bytearray(),
+                             overflow=False, started=now, terminated=None, reported=False)
         return True
 
     @staticmethod
@@ -250,13 +243,27 @@ class Probes:
     def poll(self, now):
         results = []
         for key, job in list(self.jobs.items()):
+            # Bound memory and work per tick. Do not set RLIMIT_FSIZE: it also
+            # limits driver log files unrelated to our captured stdout.
+            if not job['overflow']:
+                while len(job['buffer']) <= 64 * 1024:
+                    try:
+                        chunk = os.read(job['output'].fileno(), min(16384, 64 * 1024 + 1 - len(job['buffer'])))
+                    except BlockingIOError:
+                        break
+                    if not chunk:
+                        break
+                    job['buffer'].extend(chunk)
+                job['overflow'] = len(job['buffer']) > 64 * 1024
+            if job['overflow'] and not job['reported']:
+                self.cancel(key, now)
+                results.append((key, '', 'query_output_limit'))
+                job['reported'] = True
             rc = job['proc'].poll()
             if rc is not None:
                 if not job['reported']:
-                    job['output'].seek(0)
-                    output = job['output'].read(64 * 1024 + 1)
-                    reason = None if rc == 0 and len(output) <= 64 * 1024 else 'query_failed'
-                    results.append((key, output.decode('utf-8', 'replace'), reason))
+                    reason = None if rc == 0 else 'query_failed'
+                    results.append((key, job['buffer'].decode('utf-8', 'replace'), reason))
                 # Kill descendants too, even if the leader exited successfully.
                 self.signal(job, signal.SIGKILL)
                 job['output'].close()

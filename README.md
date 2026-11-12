@@ -274,9 +274,12 @@ Failed devices back off up to 300 seconds. A probe stuck in uninterruptible driv
 sleep cannot be guaranteed to die: it retains its probe slot, and task completion
 never waits indefinitely for it. A separate shared probe guard also prevents later
 jobs from spawning replacements while a stuck query still holds that guard.
-Probes inherit no scheduler device-lock descriptors.
+Probes inherit no scheduler device-lock descriptors. Captured stdout is limited
+to 64 KiB through nonblocking reads; driver log files are not size-limited by
+the sampler.
 
-A3/legacy formats use a verified physical-ID remap and `usages -i N -c C`.
+A3 tables with an explicit physical-ID column use that mapping directly. Older
+logic-only tables require a verified physical-ID remap; both use `usages -i N -c C`.
 Ascend 950/A5 physical-ID tables use their explicit `Chip Phy-ID` mapping and
 `usages -i N` without `-c`. Logic IDs are never assumed to be physical IDs, and
 unrecognized hardware/driver formats remain unknown. These output formats are
