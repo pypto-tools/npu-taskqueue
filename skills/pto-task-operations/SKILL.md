@@ -126,12 +126,11 @@ Never run a hardware query from the submitter shell or a `--no-device` task.
 
 ### Keep device tasks short
 
-Keep each device task as short as possible: hold cards only for the on-device run
-itself. Compile, install dependencies, generate inputs and aggregate results
-outside the allocation, or queue them with `--no-device`. Related cases that share
-one configuration may run in a single submission instead of one task per case, as
-long as the run stays short and each case keeps its own pass/fail result. Do not
-hold cards for long benchmark sweeps or unrelated work.
+Hold cards only for the on-device run: keep each device task as short as possible.
+Compile, install, generate inputs and aggregate results outside the allocation, or
+queue them with `--no-device`. Related cases that share one configuration may run
+in a single submission, each keeping its own pass/fail result. Do not hold cards for
+long sweeps or unrelated work.
 
 The scheduler reserves every requested device for the lifetime of the submitted
 process. Releasing a runtime-level device handle inside that process does not
@@ -161,41 +160,36 @@ or restart. Do not enable a collector or deploy merely to inspect telemetry.
 
 Use `task-submit --device-usage TASK_ID` or append `--json` to inspect current
 and retained telemetry. `--list` annotates sampled running tasks; `--status`
-keeps its existing machine-readable states. Sampling defaults to every 15 seconds.
+keeps its existing machine-readable states.
 A3 and A5 use different mapping/query formats: never infer a mapping by dividing
 card IDs by two or treating a logic ID as a physical ID.
 
-Metric definitions shared by `--stats`, `--usage-ranking` and `--device-usage`:
+Metrics shared by `--stats`, `--usage-ranking` and `--device-usage`:
 
-- **Valid sample (有效样本)** — one successful per-card query. Each card is sampled
-  every 15 seconds once the job holds all its cards, so the count scales with
-  allocated cards × sampled duration; a job shorter than one interval can show 0 or
-  1. Failed, timed-out and malformed queries increment only the total attempt count.
-- **Valid coverage (有效覆盖率)** — valid sampled card-seconds divided by recorded
-  card-seconds (task duration × allocated cards): how much of the allocation the
-  evidence actually covers.
-- **Card-active-time ratio (用卡时间占比)** — card-seconds with observed computation
-  divided by recorded card-seconds, capped at 100%: the share of card-holding time
-  actually spent using the cards. An interval counts as active only when the closing
-  sample is nonzero and follows the previous one within twice the sampling interval;
-  sampling gaps count for neither. No valid sample means unknown, never zero.
-- **Suspected idle (疑似空闲)** — 60 continuous seconds of valid zero-computation
-  samples counted from the moment the job holds all its cards (`USAGE_IDLE_GRACE`
-  defaults to 0; administrators may add a startup grace). A single nonzero compute
-  sample closes the event. Timeouts, gaps, missing values and unsupported formats
-  are unknown, never idle. Multi-card tasks are assessed per card.
+- **Valid sample (有效样本)** — one successful per-card query; cards are sampled
+  every 15 s after the job holds all of them, so the count grows with cards ×
+  duration. Failed queries count only as attempts.
+- **Valid coverage (有效覆盖率)** — valid sampled card-seconds / recorded
+  card-seconds (task duration × allocated cards).
+- **Card-active-time ratio (用卡时间占比)** — card-seconds with observed compute /
+  recorded card-seconds, capped at 100%. An interval counts only when its closing
+  sample is nonzero and within twice the sampling interval; gaps count for neither.
+  No valid sample means unknown, never zero.
+- **Suspected idle (疑似空闲)** — 60 continuous seconds of valid zero-compute
+  samples from the moment all cards are held (`USAGE_IDLE_GRACE` defaults to 0).
+  A nonzero sample closes it; timeouts and gaps are unknown, never idle. Assessed
+  per card.
 
-`--stats` shows only the invoking user's records unless run as root;
-`--usage-ranking` aggregates all users. Both are advisory: submitters can edit their
-own telemetry, it never cancels a task or releases cards, and it is separate from
-authoritative card-time accounting and scheduling.
+`--stats` is own-user unless run as root; `--usage-ranking` aggregates all users.
+Both are advisory: submitters can edit their own telemetry, and it never cancels a
+task or releases cards.
 
 Use `task-submit --usage-ranking [--days N] [--sort utilization|coverage] [--json]`
 for public per-user sampling aggregates. It is read-only and requires no device
 allocation. The default order is lowest card-active-time ratio first over a two-day
 window; `--sort coverage` orders by valid sampling coverage instead. A user without
-valid samples is unranked, not zero. These advisory rankings include only readable
-sampled tasks, selected by start time, and do not expose commands or individual task
+valid samples is unranked. These advisory rankings include only readable sampled
+tasks, selected by start time, and do not expose commands or individual task
 records.
 
 For archived daily server usage, use `task-submit --usage status` and

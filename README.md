@@ -232,16 +232,14 @@ valid samples and idle-event count. The telemetry table selects tasks by their
 start time; original task accounting retains its overlapping-time-window rules.
 Ordinary users see their own telemetry; root sees all users.
 
-`--stats`, `--device-usage` and `--usage-ranking` share one vocabulary. **Valid
-samples** count successful per-card queries: each card is sampled every 15
-seconds after the job holds all its cards, so the count scales with allocated
-cards × sampled duration, and a job shorter than one interval can show 0 or 1.
-Failed, timed-out or malformed queries increment only the total attempt count.
-**Valid coverage** is valid sampled card-seconds divided by recorded card-seconds
-(task duration × allocated cards). **Card-active-time ratio** is card-seconds with
-observed computation divided by recorded card-seconds, capped at 100%. **Suspected
-idle** requires 60 continuous seconds of valid zero-computation samples. All of
-these are advisory observations, not authoritative card-time accounting.
+`--stats`, `--device-usage` and `--usage-ranking` share one vocabulary: **valid
+samples** count successful per-card queries (cards are sampled every 15 seconds),
+so they scale with cards × duration and failed queries count only as attempts;
+**valid coverage** is valid sampled card-seconds / recorded card-seconds;
+**card-active-time ratio** is card-seconds with observed computation / recorded
+card-seconds, capped at 100%; **suspected idle** needs 60 continuous seconds of
+valid zero-computation samples. All of these are advisory, not authoritative
+card-time accounting.
 
 Sampling is opt-in in the administrator-owned local configuration:
 
