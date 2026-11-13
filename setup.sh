@@ -430,6 +430,8 @@ fi
 ensure_dir 755 "$APP_DIR"
 ensure_dir 755 "$SCHEDULER_APP_DIR"
 ensure_dir 755 "$APP_LIB_DIR"
+ensure_dir 755 "$APP_DIR/skills"
+ensure_dir 755 "$APP_DIR/skills/pto-task-operations"
 ensure_dir 755 "$REPO_UPDATE_MODULE_DIR"
 ensure_dir 755 "$CONFIG_DIR"
 ensure_dir 755 "$LOGS_DIR"
@@ -486,6 +488,8 @@ install_app_file "$SCRIPT_DIR/usage_report.py" "$APP_DIR/usage_report.py" 755
 install_app_file "$SCRIPT_DIR/monitor.py" "$APP_DIR/monitor.py" 644
 install_app_file "$SCRIPT_DIR/usage_monitor.py" "$APP_DIR/usage_monitor.py" 755
 install_app_file "$SCRIPT_DIR/device_usage.py" "$APP_DIR/device_usage.py" 644
+install_app_file "$SCRIPT_DIR/skills/pto-task-operations/SKILL.md" \
+    "$APP_DIR/skills/pto-task-operations/SKILL.md" 644
 for usage_monitor_unit in pto-task-usage-monitor.{service,timer}; do
     rendered_unit="$(sed "s|/home/pypto-tools/pto-task/app|$APP_DIR|g" "$SCRIPT_DIR/$usage_monitor_unit")"
     write_app_file "$APP_DIR/$usage_monitor_unit" 644 "$rendered_unit"$'\n'

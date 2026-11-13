@@ -478,9 +478,20 @@ locking, and sequence markers live in the reusable
 contains the pto-task verification bridge; `repo-auto-update-deploy.sh` owns
 idle-only installation and activation.
 
-For a concise Chinese usage guide, see [GUIDE_ZH.md](GUIDE_ZH.md). AI agents
-can use [skills/pto-task-operations/SKILL.md](skills/pto-task-operations/SKILL.md).
-Make the directory discoverable in each assistant's skill location, for example:
+For a concise Chinese usage guide, see [GUIDE_ZH.md](GUIDE_ZH.md). Any assistant
+that can run commands can read the full operating rules straight from the
+installed client, with no per-tool setup:
+
+```bash
+task-submit --skill
+```
+
+It prints the
+[skills/pto-task-operations/SKILL.md](skills/pto-task-operations/SKILL.md) that
+ships with the deployed revision, so Claude Code, Codex and other agents see
+instructions matching the installed client — including the rule that builds and
+other preparation happen outside the card allocation. Assistants with a skill
+directory may also link it for automatic discovery, for example:
 
 ```bash
 mkdir -p ~/.codex/skills ~/.claude/skills

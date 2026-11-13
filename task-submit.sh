@@ -166,6 +166,9 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
     benchmark 或 build + test + 汇总脚本打包进一个占卡任务。确需多个卡时，按该
     单个用例的实际需要用 --device-num N；多次运行由调用方逐个提交。
 
+  给 AI 助手: 运行 task-submit --skill 读取完整操作规范。编译、依赖安装、生成
+  输入等准备工作先在占卡外完成，只有真正要用卡的上板步骤才提交占卡任务。
+
 提交:
   task-submit --no-device --run "command"      不占卡执行（编译 / CPU 测试）
   task-submit "command"                        提交任务，返回 task-id（默认不分配 NPU 卡）
@@ -177,6 +180,7 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
 
 查询:
   task-submit --version                        显示已安装源码 revision
+  task-submit --skill                          输出完整操作规范（供 AI 助手和脚本读取）
   task-submit --monitor --json                  整机只读资源快照（所有提交用户）
   task-submit --wait <task-id>                 等待任务完成并实时输出日志
   task-submit --timeout N --wait <task-id>     自定义排队超时(秒，默认 600)
@@ -301,7 +305,7 @@ while [[ "${1:-}" == --* || "${1:-}" == "-i" ]]; do
             PTOAS_VERSION="$2"; shift 2 ;;
         --max-time) MAX_TIME="$2"; shift 2 ;;
         # 子命令：不在此处消费，留给下面的主 case 分派
-        --version|--device-usage|--usage-ranking|--wait|--status|--log|--cancel|--kill|--list|--clean|--maintenance|--devices|--find|--stats|--usage|--help|-h)
+        --version|--skill|--device-usage|--usage-ranking|--wait|--status|--log|--cancel|--kill|--list|--clean|--maintenance|--devices|--find|--stats|--usage|--help|-h)
             break ;;
         # 未知选项必须硬失败。此处曾是 `*) break`，会把未识别的 flag 连同其后的
         # --run/--timeout 一起当作任务命令提交，且 RUN_MODE 未置位时静默 exit 0
@@ -1380,6 +1384,12 @@ submit_task() {
         fi
     fi
 
+    # 占卡命令里出现编译/安装步骤时提示，不阻止提交
+    local build_hint='(^|[;&|[:space:]])(cmake|make|ninja|gcc|g\+\+|pip[[:space:]]+install|cargo[[:space:]]+build|npm[[:space:]]+(install|ci)|go[[:space:]]+build)[[:space:]]'
+    if [[ -n "$device_request" && "$device_request" != "none" && "$cmd" =~ $build_hint ]]; then
+        echo "${C_YELLOW}提示: 命令里检测到编译/安装步骤。编译、依赖安装、生成输入应在占卡外先完成，占卡任务只跑上板用例。详见 task-submit --skill${C_RESET}" >&2
+    fi
+
     local task_id="task_$(date +%Y%m%d_%H%M%S)_${$}${RANDOM}"
     local task_file="$PENDING_DIR/$task_id"
     local task_file_tmp="$PENDING_DIR/.${task_id}.task.tmp"
@@ -2154,6 +2164,15 @@ case "${1:-}" in
             revision="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
         fi
         printf 'pto-task revision %s\n' "${revision:-unknown}"
+        ;;
+    --skill)
+        skill_file="$SCRIPT_DIR/skills/pto-task-operations/SKILL.md"
+        if [[ ! -f "$skill_file" ]]; then
+            echo "${C_RED}错误: 未找到操作规范文件: $skill_file${C_RESET}" >&2
+            echo "${C_DIM}提示: 用 sudo bash setup.sh 重新安装，或从仓库 skills/pto-task-operations/SKILL.md 读取${C_RESET}" >&2
+            exit 1
+        fi
+        exec cat "$skill_file"
         ;;
     --wait)
         [[ -z "${2:-}" ]] && usage

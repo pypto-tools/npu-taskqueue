@@ -1,9 +1,15 @@
 ---
 name: pto-task-operations
-description: Operate, diagnose, install, update, or modify scheduling for the pypto NPU TaskQueue. Use when working with task-submit or pto-task submissions, task-submit.conf device pools, SCHEDULER_MODE, multi-card starvation or reservation, the daemon, deployment layout, configuration, queue state, logs, or device allocation.
+description: Operate, diagnose, install, update, or modify scheduling for the pypto NPU TaskQueue. Use when working with task-submit or pto-task submissions, task-submit.conf device pools, SCHEDULER_MODE, multi-card starvation or reservation, the daemon, deployment layout, configuration, queue state, logs, or device allocation. Prepares builds and CPU steps before submitting; cards are allocated only for the onboard run.
 ---
 
 # TaskQueue operations
+
+Read this before submitting: compile, install dependencies and generate inputs
+outside the card allocation, then submit only the on-device run with
+`--device`. CPU-only queued work uses `--no-device`. A submitted task holds its
+cards for the whole process lifetime, so a build inside it blocks other users
+for no benefit.
 
 Use either `task-submit` (existing user command) or `pto-task` (pypto-tools
 entry point). Both links execute the same app program and accept identical

@@ -27,6 +27,10 @@ INSTALL_ROOT="$TOOLS_ROOT/pto-task"
 [[ -x "$INSTALL_ROOT/app/task-submit" ]]
 [[ -f "$INSTALL_ROOT/app/monitor.py" ]]
 [[ -x "$INSTALL_ROOT/app/pypto-setup" ]]
+[[ -f "$INSTALL_ROOT/app/skills/pto-task-operations/SKILL.md" ]]
+[[ "$(stat -c %a "$INSTALL_ROOT/app/skills/pto-task-operations/SKILL.md")" == 644 ]]
+grep -q '^name: pto-task-operations$' "$INSTALL_ROOT/app/skills/pto-task-operations/SKILL.md"
+"$BIN_DIR/task-submit" --skill | grep -q '^name: pto-task-operations$'
 [[ -f "$INSTALL_ROOT/config/pypto-env.conf" ]]
 grep -Fqx 'ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann}"' \
     "$INSTALL_ROOT/config/pypto-env.conf"
