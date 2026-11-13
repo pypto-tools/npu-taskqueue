@@ -164,8 +164,8 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
     汇总结果放在任务外（必须排队时用 --no-device）；同配置的相关用例可以在
     一次上板里连续跑完；长跑或整套 benchmark 不要一直占卡。
 
-  给 AI 助手: 运行 task-submit --skill 读取完整操作规范。编译、依赖安装、生成
-  输入等准备工作先在占卡外完成，只有真正要用卡的上板步骤才提交占卡任务。
+  给 AI 助手: 运行 task-submit --skill 读取用卡操作规范。编译、生成输入等准备先在
+  占卡外完成，只提交真正要用卡的上板步骤。
 
 提交:
   task-submit --no-device --run "command"      不占卡执行（编译 / CPU 测试）
@@ -178,7 +178,7 @@ task-submit — 昇腾共享机的任务队列：统一排队、按需占卡
 
 查询:
   task-submit --version                        显示已安装源码 revision
-  task-submit --skill                          输出完整操作规范（供 AI 助手和脚本读取）
+  task-submit --skill                          输出用卡操作规范（供 AI 助手读取）
   task-submit --monitor --json                  整机只读资源快照（所有提交用户）
   task-submit --wait <task-id>                 等待任务完成并实时输出日志
   task-submit --timeout N --wait <task-id>     自定义排队超时(秒，默认 600)

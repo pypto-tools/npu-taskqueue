@@ -494,7 +494,7 @@ contains the pto-task verification bridge; `repo-auto-update-deploy.sh` owns
 idle-only installation and activation.
 
 For a concise Chinese usage guide, see [GUIDE_ZH.md](GUIDE_ZH.md). Any assistant
-that can run commands can read the full operating rules straight from the
+that can run commands can read the card-use operating rules straight from the
 installed client, with no per-tool setup:
 
 ```bash
