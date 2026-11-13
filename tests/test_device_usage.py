@@ -50,6 +50,16 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(card.data['events'][0]['ended_at'], 195)
         self.assertEqual(card.data['events'][0]['end_reason'], 'activity')
 
+    def test_default_idle_threshold_starts_at_card_acquisition(self):
+        sampler = usage.Sampler(['12'])
+        card = sampler.cards['12']
+        for offset in range(0, 46, 15):
+            card.observe(sampler.started + offset, {'compute': 0})
+        self.assertNotEqual(card.data['state'], 'suspected_idle')
+        card.observe(sampler.started + 60, {'compute': 0})
+        self.assertEqual(card.data['state'], 'suspected_idle')
+        self.assertEqual(card.data['idle_seconds'], 60)
+
     def test_failure_and_gap_break_zero_streak(self):
         for failure in (True, False):
             with self.subTest(failure=failure):

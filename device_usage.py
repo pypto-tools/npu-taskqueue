@@ -296,7 +296,7 @@ class Probes:
 
 
 class Sampler:
-    def __init__(self, devices, interval=15, timeout=2, grace=60, threshold=120, round_timeout=6,
+    def __init__(self, devices, interval=15, timeout=2, grace=0, threshold=60, round_timeout=6,
                  guard_dir=None):
         self.started = time.monotonic()
         self.epoch = time.time() - self.started
@@ -701,8 +701,8 @@ def run(args):
     if len(devices) <= MAX_DEVICES:
         sampler = Sampler(devices, interval=number(args.interval, 15, .1, 300),
                           timeout=number(args.timeout, 2, .05, 5),
-                          grace=number(args.grace, 60, 0, 3600),
-                          threshold=number(args.threshold, 120, .1, 3600),
+                          grace=number(args.grace, 0, 0, 3600),
+                          threshold=number(args.threshold, 60, .1, 3600),
                           round_timeout=number(args.round_timeout, 6, .1, 10),
                           guard_dir=Path(args.output).parent.parent / 'probe-locks')
     else:
@@ -773,7 +773,7 @@ def main():
     runner = commands.add_parser('run')
     for name in ('output', 'task-id', 'user', 'devices'):
         runner.add_argument('--' + name, required=True)
-    for name, default in (('interval', 15), ('timeout', 2), ('grace', 60), ('threshold', 120), ('round-timeout', 6)):
+    for name, default in (('interval', 15), ('timeout', 2), ('grace', 0), ('threshold', 60), ('round-timeout', 6)):
         runner.add_argument('--' + name, default=str(default))
     runner.add_argument('command', nargs=argparse.REMAINDER)
     reader = commands.add_parser('read')

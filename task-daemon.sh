@@ -643,7 +643,7 @@ run_task() {
                         --output "$STATE_DIR/usage/tasks/$task_id.json" \
                         --task-id "$task_id" --user "$SUBMIT_USER" --devices "$DEVICE" \
                         --interval "${USAGE_SAMPLE_INTERVAL:-15}" --timeout "${USAGE_SAMPLE_TIMEOUT:-2}" \
-                        --grace "${USAGE_IDLE_GRACE:-60}" --threshold "${USAGE_IDLE_SECONDS:-120}" \
+                        --grace "${USAGE_IDLE_GRACE:-0}" --threshold "${USAGE_IDLE_SECONDS:-60}" \
                         --round-timeout "${USAGE_SAMPLE_ROUND_TIMEOUT:-6}" -- bash "$task_script"
                 else
                     log "warning: device telemetry preparation failed for $task_id"

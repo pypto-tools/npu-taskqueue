@@ -240,8 +240,8 @@ USAGE_SAMPLING_ENABLED=true
 USAGE_SAMPLE_INTERVAL=15
 USAGE_SAMPLE_TIMEOUT=2
 USAGE_SAMPLE_ROUND_TIMEOUT=6
-USAGE_IDLE_GRACE=60
-USAGE_IDLE_SECONDS=120
+USAGE_IDLE_GRACE=0
+USAGE_IDLE_SECONDS=60
 ```
 
 Deploy the updated code through the normal idle activation procedure. The daemon
@@ -257,10 +257,11 @@ task-submit --device-usage TASK_ID --json
 task-submit --list
 ```
 
-Each card is marked **suspected idle** only after the startup grace and a
-continuous interval of successful zero-computation samples. A single nonzero
-compute metric prevents the mark. HBM occupancy is auxiliary, not proof of active
-computation. Activity closes the event; missing/invalid data, timeouts and sampling
+Each card is marked **suspected idle** once it has 60 continuous seconds of
+successful zero-computation samples, counted from the moment the job holds all
+its cards (`USAGE_IDLE_GRACE=0` by default; administrators may add a startup
+grace). A single nonzero compute metric prevents the mark. HBM occupancy is
+auxiliary, not proof of active computation. Activity closes the event; missing/invalid data, timeouts and sampling
 gaps also close it at the last confirmed observation and become unknown. Short
 jobs need not produce an idle event. Once a card has recorded idle time, the
 `--list` line keeps it: it reads `曾疑似占卡空闲 DEV=Ns；当前：<state>` with the

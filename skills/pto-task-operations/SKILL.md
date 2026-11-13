@@ -164,9 +164,10 @@ or restart. Do not enable a collector or deploy merely to inspect telemetry.
 
 Use `task-submit --device-usage TASK_ID` or append `--json` to inspect current
 and retained telemetry. `--list` annotates sampled running tasks; `--status`
-keeps its existing machine-readable states. Zero computation utilization after
-a 60-second startup grace must persist through 120 seconds of valid samples
-before a card is marked suspected idle. Sampling defaults to every 15 seconds.
+keeps its existing machine-readable states. From the moment a job holds all its
+cards, 60 continuous seconds of valid zero-computation samples mark a card
+suspected idle (`USAGE_IDLE_GRACE` defaults to 0; administrators may add a
+startup grace). Sampling defaults to every 15 seconds.
 Timeouts, unsupported formats, missing values and stale samples are unknown,
 never idle. Multi-card tasks are assessed per card. Records are advisory, may
 be written by the submitter, and must not trigger automatic cancellation or
