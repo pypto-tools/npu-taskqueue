@@ -328,6 +328,10 @@ else:
 
     def test_public_ranking_cli_is_read_only(self):
         self.execute(['sleep', '.8'])
+        # The record is real; stretch its wall time past the ranking floor.
+        record = json.loads(self.output.read_text())
+        record['started_at'] = time.time() - 60
+        self.output.write_text(json.dumps(record))
         before = self.trace.read_text()
         config = self.root / 'ranking.conf'
         config.write_text('STATE_DIR=' + str(self.state) + '\n')
@@ -537,6 +541,18 @@ class RankingTests(unittest.TestCase):
         self.assertEqual(data['ranking'][0]['user'], 'bob')
         self.assertEqual(data['status'], 'partial')
         self.assertEqual(data['skipped_records'], 1)
+
+    def test_ranking_excludes_tasks_within_the_duration_floor(self):
+        snapshots = [self.snapshot('short', duration=30),
+                     self.snapshot('long', duration=31)]
+        with mock.patch.object(usage, 'records', return_value=(snapshots, {'skipped_records': 0})), \
+             mock.patch.object(usage.time, 'time', return_value=1_000_000):
+            data = usage.ranking(Path('/unused'), days=0)
+        self.assertEqual([row['user'] for row in data['ranking']], ['long'])
+        self.assertEqual(data['short_tasks_excluded'], 1)
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            usage.print_ranking(data)
+        self.assertIn('已排除 1 个', captured.getvalue())
 
     def test_stats_filter_stays_separate_from_public_ranking(self):
         snapshots = [self.snapshot('alice'), self.snapshot('bob')]

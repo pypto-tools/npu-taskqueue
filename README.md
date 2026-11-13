@@ -238,8 +238,10 @@ so they scale with cards × duration and failed queries count only as attempts;
 **valid coverage** is valid sampled card-seconds / recorded card-seconds;
 **card-active-time ratio** is card-seconds with observed computation / recorded
 card-seconds, capped at 100%; **suspected idle** needs 60 continuous seconds of
-valid zero-computation samples. All of these are advisory, not authoritative
-card-time accounting.
+valid zero-computation samples. `--usage-ranking` also excludes tasks whose
+overall wall-clock hold is 30 seconds or less: shorter than two sampling
+intervals, they have too few samples to rank fairly. All of these are advisory,
+not authoritative card-time accounting.
 
 Sampling is opt-in in the administrator-owned local configuration:
 
@@ -332,7 +334,8 @@ task-submit --usage-ranking --days 7 --sort utilization --json
 ```
 
 The default is the top 20 users over two days, sorted by lowest card-active-time
-ratio first. A sampled interval counts as active only when the sample that closes
+ratio first. Tasks held for 30 seconds or less overall are excluded from the
+ranking and counted in the `short_tasks_excluded` output field. A sampled interval counts as active only when the sample that closes
 it shows a nonzero compute metric, and only if that sample follows the previous
 one within twice the sampling interval; gaps are attributed to no sample.
 `--sort coverage` selects valid sampling coverage; `--limit` accepts 1–100 and

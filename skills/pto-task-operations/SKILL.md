@@ -70,7 +70,8 @@ acquiring the device locks; CPU jobs never sample. `--stats [--days N]`,
   are unknown, never idle. Assessed per card.
 
 `--stats` is own-user unless run as root; `--usage-ranking` aggregates all users
-(default two days, lowest ratio first). Both are advisory: submitters can edit
+(default two days, lowest ratio first) and excludes tasks held 30 seconds or less
+overall. Both are advisory: submitters can edit
 their own record, and telemetry never cancels a task or releases cards. `--list`
 annotates sampled running tasks with accumulated idle history and current state.
 A3 and A5 use different mapping/query formats: never infer a mapping by dividing

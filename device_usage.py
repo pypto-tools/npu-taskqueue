@@ -22,6 +22,8 @@ import time
 MAX_BYTES = 256 * 1024
 MAX_DEVICES = 64
 MAX_EVENTS = 16
+# A task held for no longer than this has too few samples to rank.
+MIN_RANKED_TASK_SECONDS = 30
 
 
 def number(value, default, minimum, maximum):
@@ -579,6 +581,11 @@ def records(state, now):
     return scan(), quality
 
 
+def task_seconds(data, now):
+    """Wall-clock time the task held its cards, including still-running tasks."""
+    return max(0, (data['finished_at'] or min(now, data['updated_at'])) - data['started_at'])
+
+
 def aggregate(snapshots, days, now, user=None):
     """Weight usage by card duration and coverage by valid sampled duration."""
     totals = {}
@@ -591,7 +598,7 @@ def aggregate(snapshots, days, now, user=None):
             suspected_idle_card_seconds=0., valid_card_seconds=0., recorded_card_seconds=0.,
             active_card_seconds=0., valid_samples=0, total_samples=0, idle_events=0))
         row['task_count'] += 1
-        elapsed = max(0, (data['finished_at'] or min(now, data['updated_at'])) - data['started_at'])
+        elapsed = task_seconds(data, now)
         for card in data['devices'].values():
             row['suspected_idle_card_seconds'] += card['idle_seconds']
             row['valid_card_seconds'] += card['valid_seconds']
@@ -639,7 +646,19 @@ def ranking(state, days=2, sort='utilization', limit=20):
     snapshots, quality = records(state, now)
     # Public aggregates are intentionally separate from --stats' own-user view.
     # No task IDs, commands, environments, per-card events or sessions are emitted.
-    rows = aggregate(snapshots, days, now)
+    short_tasks = 0
+
+    def ranked_tasks():
+        nonlocal short_tasks
+        for data in snapshots:
+            if days and data['started_at'] < now - days * 86400:
+                continue
+            if task_seconds(data, now) <= MIN_RANKED_TASK_SECONDS:
+                short_tasks += 1
+            else:
+                yield data
+
+    rows = aggregate(ranked_tasks(), days, now)
     skipped = quality['skipped_records']
     key = 'active_time_ratio_pct' if sort == 'utilization' else 'valid_coverage_pct'
     rows.sort(key=lambda row: (row[key] is None, row[key] or 0, row['user']))
@@ -648,12 +667,14 @@ def ranking(state, days=2, sort='utilization', limit=20):
     return dict(schema_version=1, status='partial' if skipped else 'ok' if rows else 'empty',
                 advisory=True, generated_at=now, days=days, window_basis='task_started_at',
                 coverage_basis='recorded_card_seconds', sort=sort, order='ascending',
-                total_users=len(rows), skipped_records=skipped, ranking=rows[:limit])
+                total_users=len(rows), skipped_records=skipped,
+                short_tasks_excluded=short_tasks, ranking=rows[:limit])
 
 
 def print_ranking(data):
     metric = '用卡时间占比' if data['sort'] == 'utilization' else '有效采样覆盖率'
-    print(f'采样排名（按用户；{metric}升序，低者在前；按任务开始时间筛选；仅供参考）')
+    print(f'采样排名（按用户；{metric}升序，低者在前；按任务开始时间筛选；'
+          f'不含 {MIN_RANKED_TASK_SECONDS} 秒以内的任务；仅供参考）')
     print('名次  用户                  用卡时间占比  有效覆盖率  有效样本  疑似空闲卡时(h)')
     for row in data['ranking']:
         rank = '-' if row['rank'] is None else str(row['rank'])
@@ -662,6 +683,8 @@ def print_ranking(data):
               f"{row['suspected_idle_card_seconds'] / 3600:14.3f}")
     if not data['ranking']:
         print('(未启用采样或暂无可用记录)')
+    if data['short_tasks_excluded']:
+        print(f"已排除 {data['short_tasks_excluded']} 个整体时长不超过 {MIN_RANKED_TASK_SECONDS} 秒的任务。")
     if data['skipped_records']:
         print(f"跳过 {data['skipped_records']} 条不可用记录，排名可能不完整。")
 
