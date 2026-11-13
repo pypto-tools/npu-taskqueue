@@ -115,6 +115,7 @@ read_simple_config_key() {
         [[ "$line" == "$key="* ]] || continue
         value="${line#*=}"
         value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
         value="${value#\"}"; value="${value%\"}"
         value="${value#\'}"; value="${value%\'}"
         printf '%s' "$value"

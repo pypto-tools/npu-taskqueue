@@ -144,6 +144,12 @@ class DaemonMonitorTests(unittest.TestCase):
                 devices = {d['id']: d for d in changed['devices']}
                 self.assertEqual(devices['2']['state'], 'disabled')
                 self.assertEqual(devices['12']['state'], 'free')
+                # Whitespace between the value and an inline comment is part of
+                # the config vocabulary, not part of the value.
+                with (config / 'taskqueue.conf').open('a') as conf:
+                    conf.write('MAX_CONCURRENT=3     # spaced reload comment\n')
+                daemon.send_signal(signal.SIGHUP)
+                wait_snapshot(lambda v: v['scheduler']['max_concurrent'] == 3)
                 daemon.terminate()
                 daemon.wait(timeout=10)
                 result = subprocess.run(['bash', str(app / 'task-submit.sh'), '--monitor', '--json'],

@@ -320,6 +320,7 @@ reload_runtime_config() {
             esac
         done < "$CONF_FILE"
         value="${value%%[[:space:]]#*}"
+        value="${value%"${value##*[![:space:]]}"}"
         value="${value%\"}"; value="${value#\"}"
         value="${value%\'}"; value="${value#\'}"
         printf '%s' "$value"
