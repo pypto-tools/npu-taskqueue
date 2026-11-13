@@ -656,13 +656,21 @@ def describe(data):
     idle = {device: card for device, card in cards.items() if card['state'] == 'suspected_idle'}
     if idle:
         scope = '全部卡' if len(idle) == len(cards) else '部分卡'
-        return '疑似占卡空闲（' + scope + '）: ' + ', '.join(
+        current = '疑似占卡空闲（' + scope + '）: ' + ', '.join(
             device + '=' + str(int(card['events'][-1]['last_observed_at']
                                   - card['events'][-1]['started_at'])) + 's'
             for device, card in idle.items())
-    if any(card['state'] == 'unknown' for card in cards.values()):
-        return '采样未知'
-    return '未标记空闲'
+    elif any(card['state'] == 'unknown' for card in cards.values()):
+        current = '采样未知'
+    else:
+        current = '未标记空闲'
+    history = [(device, card['idle_seconds']) for device, card in cards.items()
+               if card['idle_seconds'] > 0]
+    if not history:
+        return current
+    return ('曾疑似占卡空闲 ' +
+            ', '.join(device + '=' + str(int(seconds)) + 's' for device, seconds in history) +
+            '；当前：' + current)
 
 
 def run(args):

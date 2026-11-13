@@ -119,6 +119,18 @@ class ClassificationTests(unittest.TestCase):
         self.assertIn('部分卡', usage.describe(data))
         self.assertEqual(data['devices']['15']['idle_seconds'], 0)
 
+    def test_describe_keeps_idle_history_alongside_current_state(self):
+        sampler = usage.Sampler(['12'], grace=0, threshold=1, interval=1)
+        start = sampler.started
+        sampler.cards['12'].observe(start, {'compute': 0})
+        sampler.cards['12'].observe(start + 1, {'compute': 0})
+        data = sampler.snapshot('task_1', 'example', start + 1)
+        self.assertEqual(usage.describe(data),
+                         '曾疑似占卡空闲 12=1s；当前：疑似占卡空闲（全部卡）: 12=1s')
+        sampler.cards['12'].observe(start + 2, {'compute': 5})
+        data = sampler.snapshot('task_1', 'example', start + 2)
+        self.assertEqual(usage.describe(data), '曾疑似占卡空闲 12=1s；当前：未标记空闲')
+
     def test_uninterruptible_probe_is_bounded_and_not_replaced(self):
         probes = usage.Probes(timeout=2, concurrency=1)
         proc = mock.Mock(pid=12345)

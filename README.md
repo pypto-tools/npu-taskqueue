@@ -262,7 +262,10 @@ continuous interval of successful zero-computation samples. A single nonzero
 compute metric prevents the mark. HBM occupancy is auxiliary, not proof of active
 computation. Activity closes the event; missing/invalid data, timeouts and sampling
 gaps also close it at the last confirmed observation and become unknown. Short
-jobs need not produce an idle event. These are sampled observations, not proof
+jobs need not produce an idle event. Once a card has recorded idle time, the
+`--list` line keeps it: it reads `曾疑似占卡空闲 DEV=Ns；当前：<state>` with the
+accumulated idle seconds per card, so a card that resumes computing still shows
+its history next to the current state. These are sampled observations, not proof
 that no kernel ran between samples. No task is killed and no allocation released
 based on telemetry. Submitters can modify their own advisory telemetry; it is
 separate from authoritative card-time accounting and scheduling.
