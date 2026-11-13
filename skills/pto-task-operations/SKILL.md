@@ -124,21 +124,18 @@ prechecks, npu-smi, DCMI and ACL initialization access devices and belong inside
 the same allocated job as the runtime test, even if they look like preparation.
 Never run a hardware query from the submitter shell or a `--no-device` task.
 
-### Keep device tasks to one onboard case
+### Keep device tasks short
 
-Use a device allocation only for the runtime execution of one independent
-onboard test case or workload configuration. Choose the device count required
-by that case. Do not put compilation, environment setup, input generation,
-multiple cases, a whole benchmark suite, or result aggregation into the same
-device task. Run CPU-only preparation and post-processing outside the device
-allocation; if they must be queued, submit them with `--no-device`. Submit
-repeated cases as separate tasks. A case may retain its own repeated runtime
-rounds when those rounds are the measurement itself.
+Keep each device task as short as possible: hold cards only for the on-device run
+itself. Compile, install dependencies, generate inputs and aggregate results
+outside the allocation, or queue them with `--no-device`. Related cases that share
+one configuration may run in a single submission instead of one task per case, as
+long as the run stays short and each case keeps its own pass/fail result. Do not
+hold cards for long benchmark sweeps or unrelated work.
 
 The scheduler reserves every requested device for the lifetime of the submitted
 process. Releasing a runtime-level device handle inside that process does not
-release the task's scheduler allocation. Keep the task command bounded to the
-single case so unrelated work does not hold cards or queue slots.
+release the task's scheduler allocation.
 
 Use `task-submit --list` before maintenance. Submit with the existing syntax,
 for example `task-submit --device auto --run "python train.py"`. Use
@@ -164,25 +161,42 @@ or restart. Do not enable a collector or deploy merely to inspect telemetry.
 
 Use `task-submit --device-usage TASK_ID` or append `--json` to inspect current
 and retained telemetry. `--list` annotates sampled running tasks; `--status`
-keeps its existing machine-readable states. From the moment a job holds all its
-cards, 60 continuous seconds of valid zero-computation samples mark a card
-suspected idle (`USAGE_IDLE_GRACE` defaults to 0; administrators may add a
-startup grace). Sampling defaults to every 15 seconds.
-Timeouts, unsupported formats, missing values and stale samples are unknown,
-never idle. Multi-card tasks are assessed per card. Records are advisory, may
-be written by the submitter, and must not trigger automatic cancellation or
-resource release. A3 and A5 use different mapping/query formats: never infer
-a mapping by dividing card IDs by two or treating a logic ID as a physical ID.
+keeps its existing machine-readable states. Sampling defaults to every 15 seconds.
+A3 and A5 use different mapping/query formats: never infer a mapping by dividing
+card IDs by two or treating a logic ID as a physical ID.
+
+Metric definitions shared by `--stats`, `--usage-ranking` and `--device-usage`:
+
+- **Valid sample (有效样本)** — one successful per-card query. Each card is sampled
+  every 15 seconds once the job holds all its cards, so the count scales with
+  allocated cards × sampled duration; a job shorter than one interval can show 0 or
+  1. Failed, timed-out and malformed queries increment only the total attempt count.
+- **Valid coverage (有效覆盖率)** — valid sampled card-seconds divided by recorded
+  card-seconds (task duration × allocated cards): how much of the allocation the
+  evidence actually covers.
+- **Card-active-time ratio (用卡时间占比)** — card-seconds with observed computation
+  divided by recorded card-seconds, capped at 100%: the share of card-holding time
+  actually spent using the cards. An interval counts as active only when the closing
+  sample is nonzero and follows the previous one within twice the sampling interval;
+  sampling gaps count for neither. No valid sample means unknown, never zero.
+- **Suspected idle (疑似空闲)** — 60 continuous seconds of valid zero-computation
+  samples counted from the moment the job holds all its cards (`USAGE_IDLE_GRACE`
+  defaults to 0; administrators may add a startup grace). A single nonzero compute
+  sample closes the event. Timeouts, gaps, missing values and unsupported formats
+  are unknown, never idle. Multi-card tasks are assessed per card.
+
+`--stats` shows only the invoking user's records unless run as root;
+`--usage-ranking` aggregates all users. Both are advisory: submitters can edit their
+own telemetry, it never cancels a task or releases cards, and it is separate from
+authoritative card-time accounting and scheduling.
 
 Use `task-submit --usage-ranking [--days N] [--sort utilization|coverage] [--json]`
 for public per-user sampling aggregates. It is read-only and requires no device
-allocation. The default order is lowest card-active-time ratio first (two-day
-window): observed computing card-seconds divided by recorded card-seconds, capped
-at 100%, with an interval counted active only when the closing sample is nonzero
-and within twice the sampling interval. Coverage and sample counts explain
-incomplete evidence. A user without valid samples is unranked, not zero. These
-advisory rankings include only readable sampled tasks, selected by start time,
-and do not expose commands or individual task records.
+allocation. The default order is lowest card-active-time ratio first over a two-day
+window; `--sort coverage` orders by valid sampling coverage instead. A user without
+valid samples is unranked, not zero. These advisory rankings include only readable
+sampled tasks, selected by start time, and do not expose commands or individual task
+records.
 
 For archived daily server usage, use `task-submit --usage status` and
 `sudo task-submit --usage day --date YYYY-MM-DD`. The archive is administrator

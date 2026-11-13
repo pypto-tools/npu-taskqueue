@@ -232,6 +232,17 @@ valid samples and idle-event count. The telemetry table selects tasks by their
 start time; original task accounting retains its overlapping-time-window rules.
 Ordinary users see their own telemetry; root sees all users.
 
+`--stats`, `--device-usage` and `--usage-ranking` share one vocabulary. **Valid
+samples** count successful per-card queries: each card is sampled every 15
+seconds after the job holds all its cards, so the count scales with allocated
+cards × sampled duration, and a job shorter than one interval can show 0 or 1.
+Failed, timed-out or malformed queries increment only the total attempt count.
+**Valid coverage** is valid sampled card-seconds divided by recorded card-seconds
+(task duration × allocated cards). **Card-active-time ratio** is card-seconds with
+observed computation divided by recorded card-seconds, capped at 100%. **Suspected
+idle** requires 60 continuous seconds of valid zero-computation samples. All of
+these are advisory observations, not authoritative card-time accounting.
+
 Sampling is opt-in in the administrator-owned local configuration:
 
 ```bash
@@ -323,18 +334,16 @@ task-submit --usage-ranking --days 7 --sort utilization --json
 ```
 
 The default is the top 20 users over two days, sorted by lowest card-active-time
-ratio first. The ratio is card-seconds with observed computation divided by
-recorded card-seconds (task duration × allocated cards), capped at 100%. A sampled
-interval counts as active only when the sample that closes it shows a nonzero
-compute metric, and only if that sample follows the previous one within twice the
-sampling interval; gaps are attributed to no sample. `--sort coverage` selects
-valid sampling coverage; `--limit` accepts 1–100 and `--days 0` includes all
-retained records. Both metrics, valid/total sample counts, recorded card-seconds,
-suspected idle card-seconds and task/event counts appear in JSON. Each valid
-sample uses the maximum recognized AI Core, AI vector, AI CPU, AI cube or NPU
-utilization percentage. HBM occupancy and control-CPU usage are excluded. Coverage
-is valid sampled intervals divided by recorded card duration. A user with no valid
-sample has an unknown ratio and is unranked, never zero. Tasks are selected by
+ratio first. A sampled interval counts as active only when the sample that closes
+it shows a nonzero compute metric, and only if that sample follows the previous
+one within twice the sampling interval; gaps are attributed to no sample.
+`--sort coverage` selects valid sampling coverage; `--limit` accepts 1–100 and
+`--days 0` includes all retained records. Both metrics, valid/total sample counts,
+recorded card-seconds, suspected idle card-seconds and task/event counts appear in
+JSON. Each valid sample uses the maximum recognized AI Core, AI vector, AI CPU, AI
+cube or NPU utilization percentage. HBM occupancy and control-CPU usage are
+excluded. A user with no valid sample has an unknown ratio and is unranked, never
+zero. Tasks are selected by
 start time, as in the telemetry table. This summarizes sampled, readable records, not every
 allocation on the host; unreadable/incomplete records are counted as skipped.
 Malformed records, invalid event timestamps and excessive JSON nesting are
