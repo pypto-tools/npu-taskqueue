@@ -1,6 +1,7 @@
 [Unit]
 Description=Task Queue Daemon (root executor)
 After=network.target
+RequiresMountsFor=/home/pypto-tools/pto-task/app
 
 [Service]
 Type=simple
