@@ -26,7 +26,7 @@ class DaemonMonitorTests(unittest.TestCase):
             logs.mkdir()
             for name in ('pending', 'running', 'done', 'locks', 'kill', 'fifo'):
                 (queue / name).mkdir(parents=True)
-            for name in ('task-daemon.sh', 'task-submit.sh', 'npu_lock.sh'):
+            for name in ('task-daemon.sh', 'task-submit.sh', 'npu_lock.sh', 'task_identity.py'):
                 shutil.copy(REPO / name, app / name)
             shutil.copytree(REPO / 'schedulers', app / 'schedulers')
             (app / 'schedulers').chmod(0o755)

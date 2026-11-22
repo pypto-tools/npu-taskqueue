@@ -248,6 +248,7 @@ class MonitorTests(unittest.TestCase):
         app = self.root / 'app'
         app.mkdir()
         shutil.copy(REPO / 'monitor.py', app)
+        shutil.copy(REPO / 'task_identity.py', app)
         shutil.copy(REPO / 'task-submit.sh', app / 'task-submit')
         (app / 'task-submit').chmod(0o755)
         (self.root / 'pto-task').symlink_to(app / 'task-submit')
@@ -300,6 +301,30 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(json.load(previous)['snapshot_seq'], 1)
         self.assertEqual(json.loads(self.output.read_text())['snapshot_seq'], 2)
         self.assertFalse(list(self.state.glob('.monitor-*')))
+
+    def test_persisted_uid_survives_account_changes(self):
+        self.task('task_saved', '2')
+        path = self.state / 'running/task_saved'
+        with path.open('a') as task:
+            task.write('SUBMIT_UID=1109\n')
+        path.chmod(0o644)
+        with patch.object(monitor.pwd, 'getpwnam', side_effect=AssertionError('must use frozen identity')):
+            self.assertEqual(self.collect()['devices'][0]['allocation']['uid'], 1109)
+        for bad in ('-1', 'not-a-uid', '4294967295', ''):
+            path.write_text(path.read_text().split('SUBMIT_UID=')[0] + 'SUBMIT_UID=' + bad + '\n')
+            value = self.collect()
+            self.assertIsNone(value['devices'][0]['allocation']['uid'])
+            self.assertEqual(value['status'], 'partial')
+
+    def test_pending_uid_cannot_override_file_owner(self):
+        self.task('task_pending', '2', kind='pending')
+        path = self.state / 'pending/task_pending'
+        with path.open('a') as task:
+            task.write(f'SUBMIT_UID={os.getuid()+1}\n')
+        self.context.update(reservation_task='task_pending', reservation_devices='2')
+        value = self.collect()
+        self.assertIsNone(value['devices'][0]['reservation']['uid'])
+        self.assertEqual(value['status'], 'partial')
 
 
 if __name__ == '__main__':

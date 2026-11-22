@@ -9,6 +9,7 @@ bash "$REPO_DIR/setup.sh" --no-init-config --tools-root "$test_root/tools" \
     --bin-dir "$test_root/bin" --sbin-dir "$test_root/sbin" > "$test_root/setup.log"
 installed="$test_root/tools/pto-task"
 test -x "$installed/app/usage_monitor.py"
+test -f "$installed/app/task_identity.py"
 test -f "$installed/app/pto-task-usage-monitor.timer"
 printf 'STATE_DIR="%s/state"\n' "$installed" > "$installed/config/taskqueue.conf"
 python3 - "$installed" <<'PY'
@@ -19,7 +20,7 @@ import sys
 root = Path(sys.argv[1])
 now = datetime.now(timezone.utc).replace(microsecond=0)
 record = root / 'state/done/task_usage_install'
-record.write_text('SUBMIT_USER=example\nDEVICE=0,1\nSTART_TIME=' + (now-timedelta(hours=1)).isoformat() + '\nFINISH_TIME=' + now.isoformat() + '\n')
+record.write_text('SUBMIT_USER=example\nSUBMIT_UID=1109\nDEVICE=0,1\nSTART_TIME=' + (now-timedelta(hours=1)).isoformat() + '\nFINISH_TIME=' + now.isoformat() + '\n')
 record.chmod(0o644)
 os.utime(record, (now.timestamp()-120, now.timestamp()-120))
 for suffix, device in (('auto', 'auto:2'), ('numeric', '0,1')):
@@ -36,6 +37,7 @@ python3 - "$test_root/before.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
 assert data['windows'][2]['card_seconds'] == 7200
+assert data['windows'][2]['users'][0]['uid'] == 1109
 assert data['status'] == 'partial'  # no live monitor in this isolated fixture
 PY
 test "$(stat -c %a "$installed/state/usage-monitor/usage.sqlite3")" = 600
@@ -44,7 +46,9 @@ if [[ "$(id -u)" -eq 0 ]]; then
     runuser -u nobody -- "$test_root/bin/task-submit" --usage-monitor --json > "$test_root/public.json"
     cmp "$test_root/before.json" "$test_root/public.json" >/dev/null || python3 - "$test_root/public.json" <<'PY'
 import json, sys
-assert json.load(open(sys.argv[1]))['windows'][2]['card_seconds'] == 7200
+window = json.load(open(sys.argv[1]))['windows'][2]
+assert window['card_seconds'] == 7200
+assert window['users'][0]['uid'] == 1109
 PY
 fi
 "$test_root/bin/task-submit" --clean --days 0
@@ -55,6 +59,8 @@ python3 -I "$installed/app/usage_monitor.py" publish
 "$test_root/bin/task-submit" --usage-monitor --json > "$test_root/after.json"
 python3 - "$test_root/after.json" <<'PY'
 import json, sys
-assert json.load(open(sys.argv[1]))['windows'][2]['card_seconds'] == 7200
+window = json.load(open(sys.argv[1]))['windows'][2]
+assert window['card_seconds'] == 7200
+assert window['users'][0]['uid'] == 1109
 PY
 echo 'usage installation, public query and cleanup preservation: PASS'

@@ -9,11 +9,15 @@ from pathlib import Path
 import re
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import urllib.request
 from zoneinfo import ZoneInfo
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from task_identity import parse_uid
 
 ISO = re.compile(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d')
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +72,8 @@ def database(path):
         CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS collections (collected REAL PRIMARY KEY);
     ''')
+    if 'uid' not in {row[1] for row in db.execute('PRAGMA table_info(tasks)')}:
+        db.execute('ALTER TABLE tasks ADD COLUMN uid INTEGER')
     return db
 
 
@@ -84,20 +90,35 @@ def collect(db, state_dir, last_output=None, retention_days=30, now=None):
                 continue
             for line in path.read_text(errors='replace').splitlines():
                 key, sep, value = line.partition('=')
-                if sep and key in ('SUBMIT_USER', 'START_TIME', 'FINISH_TIME', 'DEVICE', 'EXIT_CODE'):
+                if sep and key in ('SUBMIT_USER', 'SUBMIT_UID', 'START_TIME', 'FINISH_TIME', 'DEVICE', 'EXIT_CODE'):
+                    if key in fields:
+                        raise ValueError('duplicate accounting field')
                     fields[key] = value
             if not all(fields.get(k) for k in ('SUBMIT_USER', 'START_TIME', 'FINISH_TIME')):
                 continue
             finished = ts(fields['FINISH_TIME'])
             if finished < cutoff:
                 continue
-            db.execute('''INSERT INTO tasks VALUES (?,?,?,?,?,?)
+            uid = parse_uid(fields.get('SUBMIT_UID'))
+            if uid is not None:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                    raise ValueError('untrusted submitter identity')
+                previous = db.execute('SELECT username,started,uid FROM tasks WHERE task_id=?',
+                                      (path.name,)).fetchone()
+                if (previous and previous[:2] == (fields['SUBMIT_USER'], ts(fields['START_TIME']))
+                        and previous[2] is not None and previous[2] != uid):
+                    raise ValueError('conflicting submitter UID for the same task')
+            db.execute('''INSERT INTO tasks (task_id,username,started,finished,devices,exit_code,uid)
+                VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET username=excluded.username,
                 started=excluded.started, finished=excluded.finished,
-                devices=excluded.devices, exit_code=excluded.exit_code''',
+                devices=excluded.devices, exit_code=excluded.exit_code,
+                uid=CASE WHEN tasks.username=excluded.username AND tasks.started=excluded.started
+                         THEN coalesce(excluded.uid,tasks.uid) ELSE excluded.uid END''',
                 (path.name, fields['SUBMIT_USER'], ts(fields['START_TIME']),
                  finished, fields.get('DEVICE', ''),
-                 int(fields['EXIT_CODE']) if fields.get('EXIT_CODE', '').lstrip('-').isdigit() else None))
+                 int(fields['EXIT_CODE']) if fields.get('EXIT_CODE', '').lstrip('-').isdigit() else None, uid))
             tasks += 1
         except (OSError, ValueError) as exc:
             print(f'skip task {path.name}: {exc}', file=sys.stderr)

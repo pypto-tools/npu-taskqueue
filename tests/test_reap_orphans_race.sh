@@ -173,6 +173,8 @@ run_finishing_task_not_reaped() {
         fail "scenario 1: finishing task was reaped as an orphan"
     [[ "$(field EXIT_CODE "$done_file")" == 0 ]] ||
         fail "scenario 1: expected EXIT_CODE=0, got '$(field EXIT_CODE "$done_file")'"
+    [[ "$(field SUBMIT_UID "$done_file")" == "$(/usr/bin/id -u)" ]] ||
+        fail "scenario 1: completed task lost its submitter UID"
     grep -Fq '任务被中断' "$task_log" &&
         fail "scenario 1: successful task was marked as interrupted"
     [[ ! -e "$case_root/state/running/$task_id" ]] ||
@@ -214,6 +216,8 @@ run_real_orphan_reaped() {
         fail "scenario 2: real orphan was not reaped"
     [[ "$(field EXIT_CODE "$done_file")" == 137 ]] ||
         fail "scenario 2: expected EXIT_CODE=137, got '$(field EXIT_CODE "$done_file")'"
+    [[ "$(field SUBMIT_UID "$done_file")" == "$(/usr/bin/id -u)" ]] ||
+        fail "scenario 2: orphan recovery lost its submitter UID"
     [[ ! -e "$case_root/state/running/$task_id" ]] ||
         fail "scenario 2: running file left behind, device stays leaked"
     return 0

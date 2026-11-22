@@ -2,6 +2,7 @@ import importlib.util
 from datetime import timezone
 import json
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,6 +18,34 @@ spec.loader.exec_module(usage)
 
 
 class UsageReportTest(unittest.TestCase):
+    def test_archive_migration_preserves_uid_and_unknown_history(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            done = root / 'done'
+            done.mkdir()
+            db_path = root / 'usage.sqlite3'
+            with sqlite3.connect(db_path) as old:
+                old.execute('CREATE TABLE tasks(task_id TEXT PRIMARY KEY, username TEXT NOT NULL, started REAL NOT NULL, finished REAL NOT NULL, devices TEXT NOT NULL, exit_code INTEGER)')
+                old.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?)', ('task_old', 'alice', 0, 1, '0', 0))
+            db = usage.database(db_path)
+            self.addCleanup(db.close)
+            self.assertIsNone(db.execute('SELECT uid FROM tasks').fetchone()[0])
+            now = usage.ts('2026-11-04T12:00:00+00:00')
+            record = done / 'task_new'
+            text = ('SUBMIT_USER=alice\nSTART_TIME=2026-11-04T10:00:00+00:00\n'
+                    'FINISH_TIME=2026-11-04T11:00:00+00:00\nDEVICE=0\n')
+            record.write_text(text + 'SUBMIT_UID=1109\n')
+            record.chmod(0o644)
+            usage.collect(db, root, '', now=now)
+            self.assertEqual(db.execute('SELECT uid FROM tasks WHERE task_id="task_new"').fetchone()[0], 1109)
+            record.write_text(text + 'SUBMIT_UID=2000\n')
+            with patch('sys.stderr'):
+                self.assertEqual(usage.collect(db, root, '', now=now+1)[0], 0)
+            self.assertEqual(db.execute('SELECT uid FROM tasks WHERE task_id="task_new"').fetchone()[0], 1109)
+            record.write_text(text)
+            usage.collect(db, root, '', now=now+2)
+            self.assertEqual(db.execute('SELECT uid FROM tasks WHERE task_id="task_new"').fetchone()[0], 1109)
+
     def test_collect_retains_recent_records_and_prunes_old_ones(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -35,7 +64,7 @@ class UsageReportTest(unittest.TestCase):
             now = usage.ts('2026-11-04T12:00:00+00:00')
             os.utime(old, (now - 35 * 86400, now - 35 * 86400))
             db = usage.database(root / 'usage.sqlite3')
-            db.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?)',
+            db.execute('INSERT INTO tasks (task_id,username,started,finished,devices,exit_code) VALUES (?,?,?,?,?,?)',
                        ('old_db_task', 'alice', now - 40 * 86400,
                         now - 39 * 86400, '0', 0))
             db.execute('INSERT INTO collections VALUES (?)', (now - 35 * 86400,))
@@ -53,7 +82,7 @@ class UsageReportTest(unittest.TestCase):
     def test_dst_day_uses_local_calendar_boundaries(self):
         with tempfile.TemporaryDirectory() as temp:
             db = usage.database(Path(temp) / 'usage.sqlite3')
-            db.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?)',
+            db.execute('INSERT INTO tasks (task_id,username,started,finished,devices,exit_code) VALUES (?,?,?,?,?,?)',
                        ('task_dst', 'alice', usage.ts('2026-11-01T07:00:00+00:00'),
                         usage.ts('2026-11-02T08:00:00+00:00'), '0', 0))
             db.commit()
@@ -96,7 +125,7 @@ class UsageReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             db = usage.database(root / 'usage.sqlite3')
-            db.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?)',
+            db.execute('INSERT INTO tasks (task_id,username,started,finished,devices,exit_code) VALUES (?,?,?,?,?,?)',
                        ('task_1', 'alice', usage.ts('2026-11-02T10:00:00+00:00'),
                         usage.ts('2026-11-02T11:00:00+00:00'), '2,3', 0))
             db.commit()

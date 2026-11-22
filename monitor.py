@@ -16,12 +16,16 @@ import tempfile
 import time
 import uuid
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from task_identity import parse_uid, submitted_uid
+
 SCHEMA = 1
 MAX_BYTES = 256 * 1024
 MAX_DEVICES = 256
 MAX_AGE_MS = 15000
 STATES = ('free', 'allocated', 'reserved', 'disabled', 'external', 'error', 'unknown')
-FIELDS = {'SUBMIT_USER', 'DEVICE', 'START_TIME', 'RUN_TASK_PID', 'RUN_TASK_START_TICKS'}
+FIELDS = {'SUBMIT_USER', 'SUBMIT_UID', 'DEVICE', 'START_TIME', 'RUN_TASK_PID', 'RUN_TASK_START_TICKS'}
 
 
 class Incomplete(Exception):
@@ -101,7 +105,19 @@ def queue_records(state):
             for line in bounded_read(path, 1024 * 1024).decode('utf-8', errors='replace').splitlines():
                 key, sep, value = line.partition('=')
                 if sep and key in FIELDS:
+                    if key in ('SUBMIT_USER', 'SUBMIT_UID') and key in values:
+                        raise Incomplete('duplicate_submitter_field')
                     values[key] = value
+            if 'SUBMIT_UID' in values:
+                info = path.lstat()
+                try:
+                    if kind == 'pending':
+                        submitted_uid(values, info.st_uid)
+                    elif info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                        raise ValueError('untrusted persisted identity')
+                    parse_uid(values['SUBMIT_UID'])
+                except ValueError:
+                    values['SUBMIT_UID'] = ''
             records[kind][path.name] = values
     return records, signatures
 
@@ -147,8 +163,9 @@ def lock_state(state, ids):
 def owner(task_id, record, now, reservation=False):
     user = record.get('SUBMIT_USER') or None
     try:
-        uid = pwd.getpwnam(user).pw_uid if user else None
-    except KeyError:
+        uid = (parse_uid(record['SUBMIT_UID']) if 'SUBMIT_UID' in record
+               else pwd.getpwnam(user).pw_uid if user else None)
+    except (KeyError, ValueError):
         uid = None
     result = {'task_id': task_id, 'user': user, 'uid': uid}
     if reservation:

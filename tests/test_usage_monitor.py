@@ -43,6 +43,75 @@ class UsageFixture(unittest.TestCase):
 
 
 class UsageMonitorTest(UsageFixture):
+    def test_finished_only_task_has_uid_without_a_live_sample(self):
+        path = self.done()
+        with path.open('a') as record:
+            record.write('SUBMIT_UID=1109\n')
+        active, errors = usage.collect(self.db, self.state, self.live(count=0), self.now)
+        self.assertFalse(errors)
+        first = usage.report(self.db, self.now, ZoneInfo('UTC'), active, errors)
+        row = first['windows'][1]['users'][0]
+        self.assertEqual((row['user'], row['uid'], row['task_count'], row['card_seconds']),
+                         ('alice', 1109, 1, 8*3600))
+        usage.archive_record(self.db, path)
+        path.unlink()
+        self.db.close()
+        self.db = usage.database(self.state / 'usage-monitor/usage.sqlite3', self.now+30)
+        self.addCleanup(self.db.close)
+        active, errors = usage.collect(self.db, self.state, self.live(count=0), self.now+30)
+        second = usage.report(self.db, self.now+30, ZoneInfo('UTC'), active, errors)
+        self.assertEqual(second['windows'][1]['users'], first['windows'][1]['users'])
+
+    def test_uid_backfill_moves_rollup_without_double_counting(self):
+        path = self.done()
+        usage.archive_record(self.db, path)
+        first = usage.report(self.db, self.now, ZoneInfo('UTC'), {}, set())
+        self.assertIsNone(first['windows'][1]['users'][0]['uid'])
+        with path.open('a') as record:
+            record.write('SUBMIT_UID=1000\n')
+        usage.archive_record(self.db, path)
+        usage.archive_record(self.db, path)
+        second = usage.report(self.db, self.now, ZoneInfo('UTC'), {}, set())
+        self.assertEqual(second['windows'][1]['card_seconds'], first['windows'][1]['card_seconds'])
+        self.assertEqual(len(second['windows'][1]['users']), 1)
+        self.assertEqual(second['windows'][1]['users'][0]['uid'], 1000)
+        self.assertEqual(second['windows'][1]['users'][0]['task_count'], 1)
+        # A same-name, different task with no identity remains unknown.
+        usage.put(self.db, ('task_legacy', self.now-10, 'alice', None, self.now, 1), True)
+        rows = usage.report(self.db, self.now, ZoneInfo('UTC'), {}, set())['windows'][1]['users']
+        self.assertEqual({r['uid'] for r in rows}, {1000, None})
+
+    def test_invalid_or_conflicting_uid_does_not_reassign_accounting(self):
+        for text in ('-1', 'abc', '4294967295', '1000\nSUBMIT_UID=1001'):
+            path = self.done()
+            with path.open('a') as record:
+                record.write('SUBMIT_UID=' + text + '\n')
+            with self.assertRaises(ValueError):
+                usage.archive_record(self.db, path)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+        path = self.done()
+        usage.collect(self.db, self.state, self.live(), self.now)
+        with path.open('a') as record:
+            record.write('SUBMIT_UID=1109\n')
+        _, errors = usage.collect(self.db, self.state, self.live(), self.now+30)
+        self.assertIn('task_record_incomplete', errors)
+        self.assertEqual(self.db.execute('SELECT uid FROM tasks').fetchone()[0], 1000)
+
+    def test_archive_uid_backfills_identity_but_not_final_timing(self):
+        path = self.done(end='2026-11-06T00:15:00Z')
+        usage.archive_record(self.db, path)
+        usage.report(self.db, self.now, ZoneInfo('UTC'), {}, set())
+        directory = self.state / 'usage-report'
+        directory.mkdir()
+        with sqlite3.connect(directory / 'usage.sqlite3') as old:
+            old.execute('CREATE TABLE tasks(task_id TEXT, username TEXT, started REAL, finished REAL, devices TEXT, uid INTEGER)')
+            old.execute('INSERT INTO tasks VALUES (?,?,?,?,?,?)',
+                        ('task_a', 'alice', usage.timestamp('2026-11-05T23:00:00Z'), self.now, '0,1,2,3', 1000))
+        usage.import_archive(self.db, directory / 'usage.sqlite3')
+        report = usage.report(self.db, self.now, ZoneInfo('UTC'), {}, set())
+        self.assertEqual(report['windows'][0]['card_seconds'], 3600)
+        self.assertEqual(report['windows'][1]['users'][0]['uid'], 1000)
+
     def test_running_final_archive_and_cleanup_are_idempotent(self):
         active, errors = usage.collect(self.db, self.state, self.live(), self.now)
         report = usage.report(self.db, self.now, ZoneInfo('UTC'), active, errors)
