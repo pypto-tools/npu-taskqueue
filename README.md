@@ -121,6 +121,24 @@ Legacy root-owned `/etc/pypto-env.conf` is imported on first install when safe.
 once the task starts, the client waits for the daemon's result. Project-local
 `task-submit.conf` device policies and the existing `TASKQUEUE_DEVICE_*`
 environment controls continue to work.
+
+In GitHub Actions (`GITHUB_ACTIONS=true`), `--run` automatically binds a task
+to the waiting task-submit process. No workflow changes, tokens or API calls
+are required. The daemon checks the client's PID, process start time and host
+boot ID on each queue pass, including while all slots are occupied or the queue
+is in maintenance. A missing, zombie or replaced client cancels pending work
+without starting it, or terminates running work through the existing TERM/KILL
+and descendant-cleanup path. Results record `CANCEL_REASON=client_lost`.
+Cancellation requests persist across pending-to-running transitions, and retries
+do not extend the kill grace period. Slots remain occupied through task cleanup.
+Ordinary terminal submissions, asynchronous submissions without `--run`, and
+old tasks without client metadata retain their previous lifetime. A later
+`--wait` observes the original task; it does not transfer client ownership.
+This is local process monitoring: if Actions marks a job canceled but its waiting
+client remains alive, the daemon cannot infer the platform state. `--max-time`
+continues to provide the execution limit. Activate both updated client and daemon
+through the normal idle-only deployment procedure.
+
 `task-submit --devices status` reports every auto-pool source, the discovered
 project policy, the effective intersection used by the daemon, and conflicts
 such as fixed sequences outside the global auto pool. Malformed lists,

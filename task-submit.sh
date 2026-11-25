@@ -1376,6 +1376,45 @@ resolve_ptoas() {
     EXTRA_ENVS+=("PATH=$ptoas_dir:$ptoas_dir/bin:$PATH")
 }
 
+# Capture the waiting client, not submit_task's command-substitution subshell.
+# Publish this identity with the task so even a kill before wait_task installs
+# its signal handlers leaves enough information for daemon-side cancellation.
+init_ci_client() {
+    CI_CLIENT_PID=""
+    CI_CLIENT_START_TICKS=""
+    CI_CLIENT_BOOT_ID=""
+    [[ "${GITHUB_ACTIONS:-}" == true && "$RUN_MODE" == true ]] || return 0
+    local proc_stat
+    local -a proc_fields
+    CI_CLIENT_PID=$BASHPID
+    if ! { IFS= read -r proc_stat < "/proc/$CI_CLIENT_PID/stat" &&
+           IFS= read -r CI_CLIENT_BOOT_ID < /proc/sys/kernel/random/boot_id; } 2>/dev/null; then
+        echo "错误: 无法读取 CI 客户端身份，未提交任务" >&2
+        return 1
+    fi
+    read -ra proc_fields <<< "${proc_stat##*) }"
+    CI_CLIENT_START_TICKS=${proc_fields[19]}
+    [[ "$CI_CLIENT_START_TICKS" =~ ^[0-9]+$ && -n "$CI_CLIENT_BOOT_ID" ]]
+}
+
+# First request wins: retries must not refresh the SIGKILL grace deadline.
+request_task_cancel() {
+    local task_id="$1" reason="$2"
+    (set -o noclobber; printf 'CANCEL_REASON=%s\n' "$reason" > "$KILL_DIR/$task_id") 2>/dev/null ||
+        [[ -f "$KILL_DIR/$task_id" ]]
+}
+
+# Keep a durable marker across pending -> running. Delete the environment only
+# after confirming that the daemon did not claim it with the task.
+cancel_pending_task() {
+    local task_id="$1" reason="$2"
+    request_task_cancel "$task_id" "$reason" || return 1
+    rm -f "$PENDING_DIR/$task_id" || return 1
+    if [[ ! -f "$RUNNING_DIR/$task_id" ]]; then
+        rm -f "$PENDING_DIR/${task_id}.env"
+    fi
+}
+
 # 提交任务
 submit_task() {
     local cmd="$1"
@@ -1443,6 +1482,10 @@ EOF
     if [[ $? -ne 0 ]]; then
         echo "${C_RED}错误: 无法写入任务文件${C_RESET}" >&2
         exit 1
+    fi
+    if [[ -n "$CI_CLIENT_PID" ]]; then
+        printf 'CI_CLIENT_BOUND=1\nCI_CLIENT_PID=%s\nCI_CLIENT_START_TICKS=%s\nCI_CLIENT_BOOT_ID=%s\n' \
+            "$CI_CLIENT_PID" "$CI_CLIENT_START_TICKS" "$CI_CLIENT_BOOT_ID" >> "$task_file_tmp" || exit 1
     fi
     # 任务元数据需要被所有队列用户读取（例如 task-submit --list），不能继承
     # 提交用户可能设置的严格 umask。
@@ -1566,6 +1609,7 @@ wait_task() {
     local timeout_ms=$((TIMEOUT * 1000))
     local log_file="$LOGS_DIR/${task_id}.log"
     local tail_pid=""
+    local wait_client_pid=$BASHPID
 
     local fifo_path="$FIFO_DIR/$task_id"
     local stdin_fwd_pid=""
@@ -1573,16 +1617,21 @@ wait_task() {
 
     # Ctrl+C: 终止远端任务
     _wait_cleanup() {
+        # Persist before stopping log/stdin helpers: a second signal may kill
+        # the client while those helpers are being reaped.
+        if [[ ! -f "$DONE_DIR/$task_id" ]]; then
+            request_task_cancel "$task_id" signal || {
+                echo "错误: 无法写入终止请求: $task_id" >&2
+                exit "$_sig_exit"
+            }
+        fi
         [[ -n "$stdin_fwd_pid" ]] && kill "$stdin_fwd_pid" 2>/dev/null && wait "$stdin_fwd_pid" 2>/dev/null
         [[ -n "$tail_pid" ]] && kill "$tail_pid" 2>/dev/null && wait "$tail_pid" 2>/dev/null
         if [[ -f "$PENDING_DIR/$task_id" ]]; then
-            # 连同环境快照一并删除：pending/ 是 1777，.env 是提交时的完整 env，
-            # 只删任务文件会把它永久遗留在世界可读的目录里。
-            rm -f "$PENDING_DIR/$task_id" "$PENDING_DIR/${task_id}.env"
+            cancel_pending_task "$task_id" signal
             echo ""
             echo "${C_GREEN}已取消排队中的任务: $task_id${C_RESET}" >&2
         elif [[ -f "$RUNNING_DIR/$task_id" ]]; then
-            touch "$KILL_DIR/$task_id" 2>/dev/null
             echo ""
             echo "${C_YELLOW}已发送终止请求: $task_id，等待确认...${C_RESET}" >&2
             local w=0
@@ -1660,7 +1709,9 @@ wait_task() {
     # 实时跟踪日志。必须 -n +1：tail 默认只从最后 10 行开始跟随，而 tail 挂上来之前
     # 任务往往已经输出了几十行（8 卡任务光 npu-lock 就有 16 行），开头会被静默吞掉 ——
     # 表现为“显示获取的卡和实际获取的对不上”，实际锁全拿到了，只是前几行没显示。
-    tail -n +1 -f "$log_file" 2>/dev/null &
+    # SIGKILL skips our traps. GNU tail must also watch the client lifetime so
+    # daemon-side workload cleanup does not leave an orphaned log follower.
+    tail --pid="$wait_client_pid" -n +1 -f "$log_file" 2>/dev/null &
     tail_pid=$!
 
     # 等待任务完成
@@ -1714,7 +1765,7 @@ cancel_task() {
     local task_id="$1"
     validate_task_id "$task_id"
     if [[ -f "$PENDING_DIR/$task_id" ]]; then
-        rm -f "$PENDING_DIR/$task_id" "$PENDING_DIR/${task_id}.env"
+        cancel_pending_task "$task_id" user_cancel || return 1
         echo "${C_GREEN}已取消: $task_id${C_RESET}"
     elif [[ -f "$RUNNING_DIR/$task_id" ]]; then
         echo "${C_YELLOW}任务正在执行中，使用 --kill 终止${C_RESET}" >&2
@@ -1764,7 +1815,7 @@ kill_task() {
     fi
 
     if [[ -f "$PENDING_DIR/$task_id" ]]; then
-        rm -f "$PENDING_DIR/$task_id" "$PENDING_DIR/${task_id}.env"
+        cancel_pending_task "$task_id" user_cancel || return 1
         echo "${C_GREEN}已取消 (pending): $task_id${C_RESET}"
         return 0
     fi
@@ -1774,7 +1825,7 @@ kill_task() {
         exit 1
     fi
 
-    touch "$KILL_DIR/$task_id"
+    request_task_cancel "$task_id" user_cancel || return 1
     echo "${C_YELLOW}已发送终止请求: $task_id，等待确认...${C_RESET}"
     local w=0
     while [[ $w -lt 5 ]]; do
@@ -2422,7 +2473,8 @@ case "${1:-}" in
             exit 1
         fi
         resolve_ptoas
-        task_id=$(submit_task "$1")
+        init_ci_client || exit 1
+        task_id=$(submit_task "$1") || exit 1
         show_eight_card_policy_notice "$(build_device_request)"
         if [[ "$RUN_MODE" == "true" ]]; then
             echo "${C_DIM}任务已提交: $task_id (断开后可用 task-submit --wait $task_id 重连)${C_RESET}" >&2

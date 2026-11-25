@@ -78,6 +78,7 @@ if [[ "$TASK_EXECUTION_MODE" == HwHiAiUser ]]; then
 fi
 MAINT_FILE="$STATE_DIR/maintenance"
 CURRENT_JOBS=0
+IFS= read -r HOST_BOOT_ID < /proc/sys/kernel/random/boot_id || exit 1
 
 parse_task_file() {
     local file="$1"
@@ -143,11 +144,74 @@ read_field() {
     return 1
 }
 
+# Only GitHub Actions --run submissions carry this binding. An old/unbound
+# task keeps its detached lifetime. Read /proc rather than kill -0 so zombie
+# clients and PID reuse cannot keep an abandoned allocation alive.
+ci_client_alive() {
+    local file="$1" key value bound="" pid="" ticks="" boot="" proc_stat
+    local -a proc_fields
+    [[ -f "$file" ]] || return 0
+    while IFS='=' read -r key value; do
+        case "$key" in
+            CI_CLIENT_BOUND) bound="$value" ;;
+            CI_CLIENT_PID) pid="$value" ;;
+            CI_CLIENT_START_TICKS) ticks="$value" ;;
+            CI_CLIENT_BOOT_ID) boot="$value" ;;
+        esac
+    done < "$file" 2>/dev/null
+    [[ "$bound" == 1 ]] || return 0
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$ticks" =~ ^[0-9]+$ && "$boot" == "$HOST_BOOT_ID" ]] || return 1
+    { IFS= read -r proc_stat < "/proc/$pid/stat"; } 2>/dev/null || return 1
+    read -ra proc_fields <<< "${proc_stat##*) }"
+    [[ "${proc_fields[19]:-}" == "$ticks" &&
+       "${proc_fields[0]:-Z}" != Z && "${proc_fields[0]:-X}" != X ]]
+}
+
+request_task_cancel() {
+    local task_id="$1" reason="$2"
+    if (set -o noclobber; printf 'CANCEL_REASON=%s\n' "$reason" > "$KILL_DIR/$task_id") 2>/dev/null; then
+        log "cancel: $task_id ($reason)"
+    else
+        [[ -f "$KILL_DIR/$task_id" ]]
+    fi
+}
+
+task_cancelled() {
+    local file="$1" task_id="$2"
+    # The waiting client may exit as soon as done is published, before the
+    # supervisor removes running/. That normal completion is not client loss.
+    [[ -f "$DONE_DIR/$task_id" ]] && return 1
+    [[ -f "$KILL_DIR/$task_id" ]] && return 0
+    if ! ci_client_alive "$file"; then
+        request_task_cancel "$task_id" client_lost
+        return 0
+    fi
+    return 1
+}
+
+# Preserve the identity and cancellation reason after the running file goes
+# away, including early cancellation and recovery after a daemon restart.
+append_lifecycle_result() {
+    local task_id="$1" result="$2" key value reason
+    while IFS='=' read -r key value; do
+        case "$key" in
+            CI_CLIENT_BOUND|CI_CLIENT_PID|CI_CLIENT_START_TICKS|CI_CLIENT_BOOT_ID)
+                printf '%s=%s\n' "$key" "$value" >> "$result" ;;
+        esac
+    done < "$RUNNING_DIR/$task_id"
+    if [[ -f "$KILL_DIR/$task_id" ]]; then
+        reason=$(read_field CANCEL_REASON "$KILL_DIR/$task_id" || true)
+        case "$reason" in client_lost|signal|user_cancel) ;; *) reason=user_cancel ;; esac
+        printf 'CANCEL_REASON=%s\n' "$reason" >> "$result"
+    fi
+}
+
 # write reject result
 write_reject() {
     local task_id="$1"
     local reason="$2"
-    cat > "$DONE_DIR/$task_id" <<EOF
+    local result_file="$DONE_DIR/.${task_id}.${BASHPID}.tmp"
+    cat > "$result_file" <<EOF
 SUBMIT_USER=$SUBMIT_USER
 SUBMIT_TIME=$SUBMIT_TIME
 COMMAND=$COMMAND
@@ -163,15 +227,18 @@ DEVICE_POLICY_ENV_POOL=$DEVICE_POLICY_ENV_POOL
 DEVICE_GLOBAL_POOL=$DEVICE_GLOBAL_POOL
 DEVICE_GLOBAL_POOL_SOURCE=$DEVICE_GLOBAL_POOL_SOURCE
 FINISH_TIME=$(date -Iseconds)
-EXIT_CODE=126
+EXIT_CODE=${3:-126}
 ACCOUNTING_STATE=not_started
 EOF
+    append_lifecycle_result "$task_id" "$result_file"
     echo "$reason" > "$LOGS_DIR/${task_id}.log"
     chmod 644 "$LOGS_DIR/${task_id}.log"
+    # done/ is the client completion notification. Publish a fully written,
+    # readable result with one rename, including its lifecycle metadata.
+    chmod 644 "$result_file" && mv -f "$result_file" "$DONE_DIR/$task_id" || return 1
     # .env 必须与状态文件一起删：此路径在 run_task 读取环境快照之前早退，
     # 状态文件一消失就没人再认领这个 .env（finalize_interrupted 会直接 return）。
     rm -f "$RUNNING_DIR/$task_id" "$RUNNING_DIR/${task_id}.env"
-    chmod 644 "$DONE_DIR/$task_id"
 }
 
 # IN_USE_SET 是逗号包裹的"运行中设备号"快照（如 ",4,7,9,"），由 update_in_use_set
@@ -447,6 +514,7 @@ finalize_interrupted() {
     local task_id="$1"
     local exit_code="${2:-137}"
     local rf="$RUNNING_DIR/$task_id"
+    local result_file="$DONE_DIR/.${task_id}.${BASHPID}.tmp"
     [ -f "$rf" ] || return 0
     local submit_user submit_time command device start_time request_raw request_origin
     local sequence_source policy_conf policy_whitelist policy_blacklist policy_ignore_whitelist policy_env_pool
@@ -466,7 +534,7 @@ finalize_interrupted() {
     policy_env_pool=$(read_field DEVICE_POLICY_ENV_POOL "$rf" || true)
     global_pool=$(read_field DEVICE_GLOBAL_POOL "$rf" || true)
     global_pool_source=$(read_field DEVICE_GLOBAL_POOL_SOURCE "$rf" || true)
-    cat > "$DONE_DIR/$task_id" <<EOF
+    cat > "$result_file" <<EOF
 SUBMIT_USER=$submit_user
 SUBMIT_TIME=$submit_time
 COMMAND=$command
@@ -485,8 +553,9 @@ START_TIME=$start_time
 FINISH_TIME=$(date -Iseconds)
 EXIT_CODE=$exit_code
 EOF
-    chmod 644 "$DONE_DIR/$task_id"
+    append_lifecycle_result "$task_id" "$result_file"
     [ -f "$LOGS_DIR/${task_id}.log" ] && echo "[taskqueue] 任务被中断（daemon 停止或重启）" >> "$LOGS_DIR/${task_id}.log"
+    chmod 644 "$result_file" && mv -f "$result_file" "$DONE_DIR/$task_id" || return 1
     rm -f "$rf" "$RUNNING_DIR/${task_id}.env" "$FIFO_DIR/${task_id}" "$LOGS_DIR/${task_id}.sh"
 }
 
@@ -533,6 +602,10 @@ run_task() {
     fi
 
     parse_task_file "$RUNNING_DIR/$task_id"
+    if task_cancelled "$RUNNING_DIR/$task_id" "$task_id"; then
+        write_reject "$task_id" '[taskqueue] 任务在执行前已取消' 143
+        return 0
+    fi
 
     # 兜底: 避免 auto / auto:N 直接传给 npu-lock
     if [[ "$DEVICE" == "auto" || "$DEVICE" == auto:* ]]; then
@@ -627,6 +700,11 @@ run_task() {
             COMMAND="$COMMAND --device $DEVICE"
             log "auto-inject: --device $DEVICE"
         fi
+    fi
+
+    if task_cancelled "$RUNNING_DIR/$task_id" "$task_id"; then
+        write_reject "$task_id" '[taskqueue] 任务在执行前已取消' 143
+        return 0
     fi
 
     # 构建执行脚本（避免多层 bash -c 引号嵌套）
@@ -770,7 +848,8 @@ run_task() {
 
     log "done: $task_id (exit=$exit_code)"
 
-    cat > "$DONE_DIR/$task_id" <<EOF
+    local result_file="$DONE_DIR/.${task_id}.${BASHPID}.tmp"
+    cat > "$result_file" <<EOF
 SUBMIT_USER=$SUBMIT_USER
 SUBMIT_TIME=$SUBMIT_TIME
 COMMAND=$COMMAND
@@ -790,8 +869,9 @@ FINISH_TIME=$(date -Iseconds)
 EXIT_CODE=$exit_code
 LOG_FILE=$task_log
 EOF
+    append_lifecycle_result "$task_id" "$result_file"
+    chmod 644 "$result_file" && mv -f "$result_file" "$DONE_DIR/$task_id" || return 1
     rm -f "$RUNNING_DIR/$task_id"
-    chmod 644 "$DONE_DIR/$task_id"
     CURRENT_JOBS=$((CURRENT_JOBS - 1))
 }
 
@@ -801,6 +881,17 @@ log() {
         tail -500 "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
     fi
     echo "[$(date -Iseconds)] $*" >> "$LOG_FILE"
+}
+
+# Claim canceled pending work without ever launching it. The same atomic move
+# used by dispatch prevents cancellation from deleting a claimed environment.
+cancel_pending_task() {
+    local task_file="$1" task_id="$2"
+    mv "$task_file" "$RUNNING_DIR/$task_id" 2>/dev/null || return 1
+    [[ ! -f "$PENDING_DIR/$task_id.env" ]] ||
+        mv "$PENDING_DIR/$task_id.env" "$RUNNING_DIR/$task_id.env" 2>/dev/null
+    parse_task_file "$RUNNING_DIR/$task_id"
+    write_reject "$task_id" '[taskqueue] 排队任务已取消' 143
 }
 
 # Claim and launch a task selected by the active scheduler. Policy modules do
@@ -814,6 +905,10 @@ start_pending_task() {
 
     log "processing: $task_id"
 
+    if task_cancelled "$task_file" "$task_id"; then
+        cancel_pending_task "$task_file" "$task_id"
+        return 1
+    fi
     if ! mv "$task_file" "$RUNNING_DIR/$task_id" 2>/dev/null; then
         log "skip $task_id (already taken)"
         return 1
@@ -822,6 +917,12 @@ start_pending_task() {
     # every queue user can continue to inspect running tasks.
     chmod 644 "$RUNNING_DIR/$task_id" 2>/dev/null || log "warning: cannot normalize permissions for $task_id"
     [ -f "$PENDING_DIR/${task_id}.env" ] && mv "$PENDING_DIR/${task_id}.env" "$RUNNING_DIR/${task_id}.env" 2>/dev/null
+
+    if task_cancelled "$RUNNING_DIR/$task_id" "$task_id"; then
+        parse_task_file "$RUNNING_DIR/$task_id"
+        write_reject "$task_id" '[taskqueue] 任务在调度时已取消' 143
+        return 1
+    fi
 
     # Resolve DEVICE only after the sticky-directory claim succeeds.
     if [[ -n "$pending_dev" && "$pending_dev" != "none" ]]; then
@@ -1122,6 +1223,17 @@ reap_orphan_envs() {
     done
 }
 
+# Run even in maintenance and when all slots are occupied: abandoned pending
+# tasks must not wait for a scheduler opportunity to be canceled.
+process_client_losses() {
+    local file task_id
+    for file in "$PENDING_DIR"/task_* "$RUNNING_DIR"/task_*; do
+        [[ -f "$file" && "$file" != *.env ]] || continue
+        task_id=${file##*/}
+        task_cancelled "$file" "$task_id" || true
+    done
+}
+
 process_kills() {
     local now
     now=$(date +%s)
@@ -1130,6 +1242,9 @@ process_kills() {
         local task_id
         task_id=$(basename "$kill_file")
 
+        if [[ -f "$PENDING_DIR/$task_id" ]]; then
+            cancel_pending_task "$PENDING_DIR/$task_id" "$task_id"
+        fi
         if [ ! -f "$RUNNING_DIR/$task_id" ]; then
             rm -f "$kill_file"
             log "kill: $task_id not in running/ (stale marker removed)"
@@ -1144,10 +1259,9 @@ process_kills() {
             continue
         fi
 
-        # 进程组已消失：run_task 的 wait 会负责收尾，移除标记即可
+        # Keep the reason until run_task finishes sweeping descendants and
+        # writes done. Removing it when the leader exits loses that reason.
         if ! kill -0 "$task_pid" 2>/dev/null; then
-            rm -f "$kill_file"
-            log "kill: $task_id (pid $task_pid) already gone"
             continue
         fi
 
@@ -1174,6 +1288,7 @@ process_kills() {
 
 while $RUNNING; do
     reap_jobs
+    process_client_losses
     process_kills
     reap_orphans
     reap_orphan_envs
