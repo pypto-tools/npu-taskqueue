@@ -100,9 +100,9 @@ SCHEDULER_TASK_GROUP_AFFINITY=0
 SCHEDULER_TASK_ALLOCATION_POOLS=""
 SCHEDULER_GROUPS_LOADED=0
 SCHEDULER_GROUPS_LOADED_SPEC=""
-declare -A SCHEDULER_GROUP_OF=()
+declare -gA SCHEDULER_GROUP_OF=()
 SCHEDULER_POOLS_LOADED_SPEC=""
-declare -A SCHEDULER_POOL_OF=()
+declare -gA SCHEDULER_POOL_OF=()
 
 scheduler_load_allocation_pools() {
     local spec="${SCHEDULER_TASK_ALLOCATION_POOLS:-}" group id index=0
@@ -258,11 +258,12 @@ scheduler_devices_same_group() {
 scheduler_max_group_size() {
     local list="$1" id group max=0
     local -a ids
-    local -A tally=()
+    local -A tally=() seen=()
     scheduler_load_device_groups
     IFS=',' read -ra ids <<< "$list"
     for id in "${ids[@]}"; do
-        [[ -n "$id" ]] || continue
+        [[ -n "$id" && -z "${seen[$id]:-}" ]] || continue
+        seen["$id"]=1
         group="$(scheduler_group_of "$id")"
         tally["$group"]=$(( ${tally[$group]:-0} + 1 ))
         (( tally[$group] > max )) && max=${tally[$group]}
@@ -279,14 +280,16 @@ scheduler_task_group_affinity() {
     esac
 }
 
-scheduler_pool_capacity() {
-    local effective id key max=0
+# Count feasible cards in the supplied list, independently of the live allowlist.
+scheduler_capacity_for_devices() {
+    local effective="$1" id key max=0
     local -a ids
-    local -A counts=()
-    effective=$(scheduler_effective_pool "${1:-}")
+    local -A counts=() seen=()
     if [[ -n "${SCHEDULER_TASK_ALLOCATION_POOLS:-}" ]]; then
         IFS=',' read -ra ids <<< "$effective"
         for id in "${ids[@]}"; do
+            [[ -n "$id" && -z "${seen[$id]:-}" ]] || continue
+            seen["$id"]=1
             scheduler_set_allocation_key "$id" || continue
             key="$SCHEDULER_ALLOCATION_KEY"
             counts["$key"]=$(( ${counts[$key]:-0} + 1 ))
@@ -300,6 +303,10 @@ scheduler_pool_capacity() {
         return
     fi
     device_request_count "$effective"
+}
+
+scheduler_pool_capacity() {
+    scheduler_capacity_for_devices "$(scheduler_effective_pool "${1:-}")"
 }
 
 scheduler_devices_intersect() {
@@ -518,76 +525,130 @@ scheduler_start_planned_task() {
 # PRIORITY_AGING_SECONDS=0 disables the mechanism and restores plain FIFO.
 
 SCHEDULER_ORDERED_TASKS=()
+SCHEDULER_PRIORITY_COUNT=0
 
 scheduler_order_pending_tasks() {
-    local file owner ctime rest line now threshold
-    local -a files head=() normal=()
-    local -A eligible=()
+    local file owner ctime rest record now threshold
+    local -a files=() head=() normal=()
+    local -A classified=()
 
+    SCHEDULER_PRIORITY_COUNT=0
     SCHEDULER_ORDERED_TASKS=()
-    threshold="${PRIORITY_AGING_SECONDS:-0}"
-    files=( "$PENDING_DIR"/task_* )
+    for file in "$PENDING_DIR"/task_*; do
+        [[ "$file" != *.env && -f "$file" ]] && files+=("$file")
+    done
     (( ${#files[@]} )) || return 0
-    [[ -f "${files[0]}" ]] || return 0
 
-    # Without aging there is no bound on what a grant could postpone, so the
-    # whole mechanism stays off.
+    threshold="${PRIORITY_AGING_SECONDS:-0}"
     if [[ ! "$threshold" =~ ^[0-9]+$ ]] || (( threshold == 0 )); then
         SCHEDULER_ORDERED_TASKS=("${files[@]}")
         return 0
     fi
 
-    # The ledger library is installed with this core. If it is absent, the
-    # queue still dispatches in plain FIFO rather than losing the tick.
-    if ! declare -F priority_load_grants >/dev/null; then
-        SCHEDULER_ORDERED_TASKS=("${files[@]}")
-        return 0
-    fi
-
-    priority_load_grants
+    priority_load_grants || return 1
     printf -v now '%(%s)T' -1
 
-    # One stat call carries the owner and ctime of every pending file. A failed
-    # or partial result leaves those tasks unclassified; they stay in FIFO order
-    # instead of disappearing from the tick.
-    while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        owner="${line%% *}"
-        rest="${line#* }"
-        ctime="${rest%% *}"
-        file="${rest#* }"
-        [[ "$ctime" =~ ^[0-9]+$ ]] || continue
+    # Publication renames the pending file and sets its ctime. Sort the full
+    # timestamp numerically (including nanoseconds), then the pathname for ties.
+    # Batch stat inputs to stay below ARG_MAX even on a backed-up queue.
+    while IFS= read -r -d '' record; do
+        owner=${record%% *}
+        rest=${record#* }
+        ctime=${rest%% *}
+        file=${rest#* }
+        [[ -n "$owner" && "$ctime" =~ ^[0-9]+\.[0-9]{9}$ && -n "$file" ]] || continue
         if [[ -n "${PRIORITY_GRANT_UNTIL[$owner]:-}" ]] ||
-           (( now - ctime >= threshold )); then
-            eligible["$file"]=1
+           (( now - ${ctime%.*} >= threshold )); then
+            head+=("$file")
+            classified["$file"]=priority
+        else
+            classified["$file"]=normal
         fi
-    done < <(stat -c '%U %Z %n' -- "${files[@]}" 2>/dev/null || true)
+    done < <(printf '%s\0' "${files[@]}" |
+        LC_ALL=C xargs -0 -r stat --printf='%U %.9Z %n\0' -- 2>/dev/null |
+        LC_ALL=C sort -z -k2,2n -k3)
 
+    # A cancellation can legitimately leave a stat record missing. Any live
+    # task without metadata could be the priority head: retry the whole tick.
     for file in "${files[@]}"; do
-        [[ -f "$file" && "$file" != *.env ]] || continue
-        [[ -n "${eligible[$file]:-}" ]] && head+=("$file")
+        [[ -f "$file" ]] || continue
+        case "${classified[$file]:-}" in
+            priority) ;;
+            normal) normal+=("$file") ;;
+            *) log "defer dispatch: priority metadata unavailable for $file"; return 1 ;;
+        esac
     done
-    for file in "${files[@]}"; do
-        [[ -f "$file" && "$file" != *.env ]] || continue
-        [[ -n "${eligible[$file]:-}" ]] && continue
-        normal+=("$file")
-    done
+    SCHEDULER_PRIORITY_COUNT=${#head[@]}
     SCHEDULER_ORDERED_TASKS=("${head[@]}" "${normal[@]}")
 }
+
+# Return a reason only for requests which cannot fit even with all cards free.
+# Explicit requests keep their own IDs, independent of the auto-device pool.
+scheduler_request_error() {
+    local request="$1" count="$2" pool="$3" capacity
+    if [[ -n "$SCHEDULER_TASK_ALLOCATION_POOLS" ]] &&
+       ! scheduler_allocation_pools_valid "$SCHEDULER_TASK_ALLOCATION_POOLS"; then
+        echo "malformed logical whitelist pools"
+        return
+    fi
+    [[ -n "$request" && "$request" != none ]] || return 0
+    if (( count <= 0 )); then
+        echo "invalid device request '$request'"
+    elif [[ "$request" == auto || "$request" == auto:* ]]; then
+        # Only fixed task constraints can prove this request impossible. A
+        # runtime allowlist may expand again while an admitted task waits.
+        if [[ -z "$pool" ]]; then
+            if [[ -n "$SCHEDULER_TASK_ALLOCATION_POOLS" ]]; then
+                pool=${SCHEDULER_TASK_ALLOCATION_POOLS//;/,}
+            elif scheduler_group_affinity_active; then
+                pool=${DEVICE_GROUPS//;/,}
+            else
+                return 0
+            fi
+        fi
+        capacity=$(scheduler_capacity_for_devices "$pool")
+        if (( count > capacity )); then
+            echo "device request '$request' exceeds eligible pool capacity ($capacity)"
+        fi
+    elif ! scheduler_devices_same_allocation_pool "$request"; then
+        echo "requested devices '$request' span logical whitelist pools"
+    elif scheduler_group_affinity_active && ! scheduler_devices_same_group "$request"; then
+        echo "requested devices '$request' span device groups"
+    fi
+}
+
+# Claim before publishing the terminal result, just as a start claims before
+# launching. If a client cancelled first, its result already owns the task.
+scheduler_reject_pending_task() (
+    local task_file="$1" task_id="$2" reason="$3"
+    mv "$task_file" "$RUNNING_DIR/$task_id" 2>/dev/null || return 0
+    rm -f "$PENDING_DIR/${task_id}.env"
+    parse_task_file "$RUNNING_DIR/$task_id"
+    log "reject $task_id: $reason"
+    write_reject "$task_id" "error: $reason"
+)
 
 # Traverse the pending queue once. Policy modules see a stable per-task snapshot
 # and return exactly one decision; all mutation remains in daemon core.
 scheduler_schedule_tick() {
     local task_file task_id pending_request pending_device_count device_pool
-    local policy_failed=0
+    local policy_failed=0 waiting_priority="" request_error index
 
     if declare -F scheduler_begin_tick >/dev/null && ! scheduler_begin_tick; then
         log "scheduler error: $SCHEDULER_MODE failed to begin tick"
         return 1
     fi
 
-    scheduler_order_pending_tasks
-    for task_file in "${SCHEDULER_ORDERED_TASKS[@]}"; do
+    scheduler_order_pending_tasks || policy_failed=1
+    for index in "${!SCHEDULER_ORDERED_TASKS[@]}"; do
+        task_file=${SCHEDULER_ORDERED_TASKS[$index]}
+        # Every exit path below (policy defer, host limit, failed claim) obeys
+        # the same barrier. Start, rejection and cancellation all remove the
+        # pending file and immediately allow the next task through.
+        if [[ -n "$waiting_priority" && -f "$waiting_priority" ]]; then
+            break
+        fi
+        waiting_priority=""
         [[ -f "$task_file" ]] || continue
         [[ "$task_file" == *.env ]] && continue
 
@@ -604,7 +665,14 @@ scheduler_schedule_tick() {
         # allocation and validation so policies cannot opt out of the invariant.
         SCHEDULER_TASK_GROUP_AFFINITY=$(scheduler_task_group_affinity "$task_file")
         SCHEDULER_TASK_ALLOCATION_POOLS=$(read_field DEVICE_ALLOCATION_POOLS "$task_file" || true)
-        if [[ -n "$SCHEDULER_TASK_ALLOCATION_POOLS" ]] &&
+        if (( index < SCHEDULER_PRIORITY_COUNT )); then
+            waiting_priority="$task_file"
+            request_error=$(scheduler_request_error "$pending_request" "$pending_device_count" "$device_pool")
+            if [[ -n "$request_error" ]]; then
+                scheduler_reject_pending_task "$task_file" "$task_id" "$request_error"
+                continue
+            fi
+        elif [[ -n "$SCHEDULER_TASK_ALLOCATION_POOLS" ]] &&
            ! scheduler_allocation_pools_valid "$SCHEDULER_TASK_ALLOCATION_POOLS"; then
             log "scheduler reject $task_id: malformed logical whitelist pools"
             continue

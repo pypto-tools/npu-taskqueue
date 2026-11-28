@@ -93,7 +93,7 @@ or change scheduler configuration only on an explicit request.
 
 Granting priority queueing is also an administrator action: `sudo task-submit
 --priority grant <user> --days N` (at most 14 days, never extendable),
-`--priority revoke <user>` and `--priority list`. It only changes waiting order;
-it never preempts a running task or bypasses concurrency, device-pool or
-reservation limits, and ordinary tasks join the priority bucket once they have
-waited `PRIORITY_AGING_SECONDS`.
+`--priority revoke <user>` and `--priority list`.
+Granted tasks and tasks that have waited `PRIORITY_AGING_SECONDS` start in FIFO
+order. A waiting priority head holds up all later starts until it starts or
+leaves the queue. Running jobs keep their allocations.

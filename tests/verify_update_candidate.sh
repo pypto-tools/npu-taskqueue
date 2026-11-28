@@ -18,6 +18,7 @@ PYTHONDONTWRITEBYTECODE=1 \
     python3 -m unittest discover -s tests -p 'test_device_usage.py'
 bash tests/test_usage_install.sh
 bash tests/test_scheduler_core.sh
+bash tests/test_priority_queue.sh
 bash tests/test_pool_aware_reservation.sh
 bash tests/test_device_group_affinity.sh
 bash tests/test_whitelist_pools.sh

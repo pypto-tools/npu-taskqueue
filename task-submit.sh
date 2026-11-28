@@ -2284,7 +2284,8 @@ list_tasks() {
             has_any=true
             local tid
             tid=$(basename "$f")
-            local exit_code
+            local submit_user exit_code
+            submit_user=$(grep -m1 '^SUBMIT_USER=' "$f" | cut -d= -f2-)
             exit_code=$(grep "^EXIT_CODE=" "$f" | cut -d= -f2-)
             local cmd
             cmd=$(strip_npu_lock "$(grep "^COMMAND=" "$f" | cut -d= -f2-)")
@@ -2316,7 +2317,7 @@ list_tasks() {
                 status_color="$C_RED"
                 status_text="exit=$exit_code"
             fi
-            printf "  %-38s %4s  ${C_DIM}%7s${C_RESET}  ${status_color}%-10s${C_RESET} %s\n" "$tid" "$age" "$duration" "$status_text" "$cmd"
+            printf "  %-38s %4s  ${C_DIM}%7s${C_RESET}  ${status_color}%-10s${C_RESET} [user=%s] %s\n" "$tid" "$age" "$duration" "$status_text" "${submit_user:-未知}" "$cmd"
         done <<< "$done_files"
         echo ""
     fi

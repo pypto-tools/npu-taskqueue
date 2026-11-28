@@ -14,7 +14,9 @@
 
 PRIORITY_GRANT_MAX_DAYS=14
 
-declare -A PRIORITY_GRANT_UNTIL=()
+# The daemon sources this module inside load_scheduler(). Keep username keys
+# associative after that function returns.
+declare -gA PRIORITY_GRANT_UNTIL=()
 
 # Populate PRIORITY_GRANT_UNTIL[user]=expiry_epoch with unexpired grants.
 priority_load_grants() {

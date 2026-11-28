@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Priority ordering contract: granted users and aged ordinary tasks share the
-# head bucket, everything else keeps FIFO, and accounting stays fail-open when
-# the file metadata cannot be read.
+# priority queue. Incomplete metadata pauses dispatch until the next tick.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,7 +16,7 @@ PRIORITY_STAT_FIXTURE="$TEST_ROOT/stat.fixture"
 PRIORITY_STAT_CALLS="$TEST_ROOT/stat.calls"
 export PRIORITY_STAT_FIXTURE PRIORITY_STAT_CALLS
 
-AVAILABLE_DEVICES="0,1,2,3"
+AVAILABLE_DEVICES="0,1,2,3,4"
 RUNTIME_DEVICES=""
 IN_USE_SET=","
 CURRENT_JOBS=0
@@ -54,9 +53,12 @@ read_field() {
 }
 
 device_request_count() {
+    local -a ids
     case "$1" in
         ""|none) printf '0' ;;
-        *) printf '1' ;;
+        auto) printf '1' ;;
+        auto:*) printf '%s' "${1#auto:}" ;;
+        *) IFS=, read -ra ids <<< "$1"; printf '%s' "${#ids[@]}" ;;
     esac
 }
 
@@ -64,10 +66,11 @@ device_request_count() {
 # so the fixture can script any ownership/age combination without root or sleep.
 cat > "$FAKE_BIN/stat" <<'EOF'
 #!/usr/bin/env bash
-if [[ "${1:-}" == -c && "${2:-}" == '%U %Z %n' ]]; then
+if [[ "${1:-}" == '--printf=%U %.9Z %n\0' ]]; then
     printf 'called\n' >> "${PRIORITY_STAT_CALLS:?}"
     [[ "${PRIORITY_STAT_FAIL:-0}" == 1 ]] && exit 1
     [[ -r "${PRIORITY_STAT_FIXTURE:-}" ]] || exit 1
+    [[ -z "${PRIORITY_CANCEL_DURING_STAT:-}" ]] || rm -f "$PRIORITY_CANCEL_DURING_STAT"
     cat "$PRIORITY_STAT_FIXTURE"
     exit 0
 fi
@@ -77,7 +80,8 @@ chmod 755 "$FAKE_BIN/stat"
 PATH="$FAKE_BIN:$PATH"
 
 # shellcheck source=../schedulers/_core.sh
-source "$REPO_DIR/schedulers/_core.sh"
+load_scheduler() { source "$REPO_DIR/schedulers/_core.sh"; }
+load_scheduler
 
 NOW="$(printf '%(%s)T' -1)"
 FUTURE=$((NOW + 86400))
@@ -87,9 +91,9 @@ make_task() {
     printf 'DEVICE=none\n' > "$PENDING_DIR/$1"
 }
 
-# add_entry <task_id> <owner> <age_seconds>
+# add_entry <task_id> <owner> <age_seconds> [nine-digit fraction]
 add_entry() {
-    printf '%s %s %s\n' "$2" "$((NOW - $3))" "$PENDING_DIR/$1" \
+    printf '%s %s.%s %s\0' "$2" "$((NOW - $3))" "${4:-000000000}" "$PENDING_DIR/$1" \
         >> "$PRIORITY_STAT_FIXTURE"
 }
 
@@ -100,7 +104,7 @@ reset_case() {
     : > "$PRIORITY_FILE"
     PRIORITY_AGING_SECONDS=1800
     SCHEDULER_ORDERED_TASKS=()
-    unset PRIORITY_STAT_FAIL 2>/dev/null || true
+    unset PRIORITY_STAT_FAIL PRIORITY_CANCEL_DURING_STAT
 }
 
 ordered_basenames() {
@@ -169,27 +173,6 @@ assert_eq "$T1 $T2 $T3" "$(ordered_basenames)" "aging 0 restores plain FIFO"
 PRIORITY_AGING_SECONDS=abc
 assert_eq "$T1 $T2 $T3" "$(ordered_basenames)" "invalid threshold disables ordering"
 
-# Fail-open: an unreadable metadata pass must not drop tasks from the tick.
-reset_case
-make_task "$T1"
-make_task "$T3"
-add_entry "$T1" carol 5000
-add_entry "$T3" bob 10
-grant bob "$FUTURE"
-export PRIORITY_STAT_FAIL=1
-assert_eq "$T1 $T3" "$(ordered_basenames)" "failed metadata keeps FIFO and all tasks"
-
-# Fail-open: a partial metadata pass classifies only what it reports; the
-# unlisted task stays in the normal bucket instead of disappearing.
-reset_case
-make_task "$T1"
-make_task "$T3"
-add_entry "$T1" carol 5000
-grant bob "$FUTURE"
-assert_eq "$T1 $T3" "$(ordered_basenames)" "partial metadata keeps unlisted task"
-scheduler_order_pending_tasks
-assert_eq 2 "${#SCHEDULER_ORDERED_TASKS[@]}" "partial metadata kept both tasks"
-
 # Malformed and unknown-user lines grant nothing; the valid line still counts.
 reset_case
 make_task "$OLD"
@@ -223,21 +206,139 @@ printf 'K=V\n' > "$PENDING_DIR/$OLD.env"
 add_entry "$OLD" alice 100
 assert_eq "$OLD" "$(ordered_basenames)" "env sidecar is excluded"
 
-# The tick consumes the computed order, not the raw glob order.
-reset_case
-make_task "$OLD"
-make_task "$NEW"
-add_entry "$OLD" alice 100
-add_entry "$NEW" bob 10
-grant bob "$FUTURE"
-CONSIDERED=""
-scheduler_consider_task() {
-    CONSIDERED+="${CONSIDERED:+ }$(basename "$1")"
-    scheduler_plan_defer fixture
+# Dispatch using the shipped backfill policy with an in-memory occupancy set
+# and a successful claim modelled by removing the pending file.
+source "$REPO_DIR/schedulers/backfill.sh"
+any_device_in_use() { scheduler_devices_intersect "$1" "$BUSY_DEVICES"; }
+resolve_device_request() {
+    scheduler_find_free_devices "$(device_request_count "$3")" "$4"
 }
+start_pending_task() {
+    rm "$1"
+    STARTED+="${STARTED:+ }$2"
+    BUSY_DEVICES+=",${3}"
+}
+
+# The older, larger priority task has the lexically later ID. One nanosecond
+# must decide their order even at modern (ten-digit) epoch times.
+reset_case
+EARLIER=task_20260101_000001_999
+LATER=task_20260101_000001_111
+printf 'DEVICE=auto:4\nDEVICE_POOL=0,1,2,3\n' > "$PENDING_DIR/$EARLIER"
+make_task "$LATER"
+add_entry "$LATER" bob 10 900000002
+add_entry "$EARLIER" bob 10 900000001
+grant bob "$FUTURE"
+BUSY_DEVICES=2
+STARTED=""
 scheduler_schedule_tick
-assert_eq "$NEW $OLD" "$CONSIDERED" "tick traverses the priority order"
-unset -f scheduler_consider_task
+assert_eq "" "$STARTED" "younger task in same second cannot pass blocked head"
+BUSY_DEVICES=""
+scheduler_schedule_tick
+assert_eq "$EARLIER $LATER" "$STARTED" "subsecond FIFO"
+
+reset_case
+make_task "$EARLIER"
+make_task "$LATER"
+add_entry "$EARLIER" bob 10 900000001
+add_entry "$LATER" alice 10 900000001
+grant bob "$FUTURE"
+printf 'alice %s %s\n' "$FUTURE" "$NOW" >> "$PRIORITY_FILE"
+assert_eq "$LATER $EARLIER" "$(ordered_basenames)" "equal timestamps use task ID"
+
+# Check both total and partial stat failure through dispatch. The known task
+# is runnable, but the unread task may outrank it.
+reset_case
+make_task "$T1"
+make_task "$T2"
+add_entry "$T2" bob 5
+grant bob "$FUTURE"
+STARTED=""
+export PRIORITY_STAT_FAIL=1
+if scheduler_schedule_tick; then fail "total metadata failure went undetected"; fi
+assert_eq "" "$STARTED" "no dispatch after total stat failure"
+unset PRIORITY_STAT_FAIL
+if scheduler_schedule_tick; then fail "partial metadata failure went undetected"; fi
+assert_eq "" "$STARTED" "no dispatch after partial stat failure"
+add_entry "$T1" alice 5000
+scheduler_schedule_tick
+assert_eq "$T1 $T2" "$STARTED" "retry starts the previously unread aged head first"
+
+reset_case
+make_task "$T1"
+make_task "$T2"
+add_entry "$T2" bob 5
+export PRIORITY_CANCEL_DURING_STAT="$PENDING_DIR/$T1"
+STARTED=""
+scheduler_schedule_tick
+assert_eq "$T2" "$STARTED" "missing metadata for a cancelled file does not stall dispatch"
+
+# A submitted request with or without a task-local pool survives a temporary
+# runtime restriction and still precedes ordinary work when cards return.
+for task_pool in '' '0,1,2,3'; do
+    reset_case
+    printf 'DEVICE=auto:4\nDEVICE_POOL=%s\n' "$task_pool" > "$PENDING_DIR/$T1"
+    make_task "$T2"
+    add_entry "$T1" bob 10
+    add_entry "$T2" alice 5
+    grant bob "$FUTURE"
+    RUNTIME_DEVICES="0,1"
+    BUSY_DEVICES=""
+    STARTED=""
+    scheduler_schedule_tick
+    [[ -f "$PENDING_DIR/$T1" ]] || fail "runtime pool shrink removed the priority head"
+    assert_eq "" "$STARTED" "temporarily narrowed pool blocks later starts"
+    RUNTIME_DEVICES=""
+    scheduler_schedule_tick
+    assert_eq "$T1 $T2" "$STARTED" "restoring capacity unblocks the original request"
+done
+
+reset_case
+make_task "$T1"
+printf 'DEVICE=auto:4\nDEVICE_POOL=0,1,2,3\n' > "$PENDING_DIR/$T2"
+printf 'DEVICE=4\n' > "$PENDING_DIR/$T3"
+add_entry "$T1" alice 5
+add_entry "$T2" bob 10
+add_entry "$T3" bob 5
+grant bob "$FUTURE"
+BUSY_DEVICES=1
+STARTED=""
+scheduler_schedule_tick
+assert_eq "" "$STARTED" "waiting priority head blocks a younger priority job and ordinary CPU work"
+BUSY_DEVICES=""
+scheduler_schedule_tick
+assert_eq "$T2 $T3 $T1" "$STARTED" "freeing last card drains priority and resumes backfill in the same tick"
+
+reset_case
+printf 'DEVICE=0,1,2,3,4,5,6,7\n' > "$PENDING_DIR/$T1"
+make_task "$T2"
+add_entry "$T1" alice 5000
+add_entry "$T2" bob 10
+grant bob "$FUTURE"
+MAX_CONCURRENT_8_CARD_TASKS=1
+RUNNING_8_CARD_TASKS=1
+STARTED=""
+scheduler_schedule_tick
+assert_eq "" "$STARTED" "aged ordinary head waiting on eight-card cap blocks granted user"
+rm "$PENDING_DIR/$T1"
+scheduler_schedule_tick
+assert_eq "$T2" "$STARTED" "cancelling the capped head unblocks dispatch"
+MAX_CONCURRENT_8_CARD_TASKS=0
+RUNNING_8_CARD_TASKS=0
+
+reset_case
+printf 'DEVICE=0,1\n' > "$PENDING_DIR/$T1"
+make_task "$T2"
+add_entry "$T1" bob 10
+add_entry "$T2" alice 5
+grant bob "$FUTURE"
+BUSY_DEVICES=1
+STARTED=""
+scheduler_schedule_tick
+assert_eq "" "$STARTED" "active grant blocks ordinary backfill"
+grant bob "$PAST"
+scheduler_schedule_tick
+assert_eq "$T2" "$STARTED" "expired grant restores ordinary backfill"
 
 # Ledger query helpers: only unexpired grants are visible.
 reset_case

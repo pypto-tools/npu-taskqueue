@@ -237,16 +237,20 @@ restart. The duration defaults to and is capped at `PRIORITY_GRANT_MAX_DAYS`
 expires; that is what keeps the permission a renewable, explicit decision
 rather than a permanent one.
 
-While a grant is active, that user's pending tasks are considered before
-ordinary tasks, and each bucket keeps FIFO order. Fairness comes from
-`PRIORITY_AGING_SECONDS` (default 1800; `0` disables priority ordering): a task
-that has waited that long joins the head bucket at its true FIFO position, so a
-grant can only reorder tasks younger than the threshold and every ordinary
-task reaches the head bucket after bounded waiting. Eligibility is recomputed
-on every scheduling tick, so a task still pending after expiry drops back to
-ordinary order. Priority never preempts a running task and never
-bypasses concurrency limits, device pools, plane affinity or the
-`pool_aware_reservation` barrier — it only changes queue order.
+Granted users' pending tasks and ordinary tasks that have waited
+`PRIORITY_AGING_SECONDS` (default 1800 seconds) share one strict FIFO queue.
+Each scheduling tick orders eligible tasks by the pending file’s nanosecond
+change timestamp, using the task ID to break ties. If metadata for a pending
+task cannot be read, dispatch retries on the next tick. When the priority head
+needs busy cards or a concurrency slot, all later starts wait, even jobs using
+a different pool or no devices. Running
+jobs finish normally. Once the last priority task starts, ordinary dispatch
+resumes in the same tick under the configured policy.
+
+The daemon rejects a priority request that exceeds its fixed device pool or
+group capacity and records the reason in the task log. A temporary reduction
+in the host allowlist leaves the request pending. Set
+`PRIORITY_AGING_SECONDS=0` to disable both grants and aging for dispatch.
 
 ### Task execution identity
 

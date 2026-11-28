@@ -236,6 +236,7 @@ run_dynamic_module_case() {
 SCHEDULER_MODULE_API_VERSION=2
 SCHEDULER_MODULE_NAME=future_policy
 scheduler_consider_task() {
+    log "considered $2"
     scheduler_plan_defer fixture
 }
 EOF
@@ -272,6 +273,13 @@ fi
 EOF
     chmod 755 "$app/task-daemon.sh" "$fake_bin/id" "$fake_bin/stat"
 
+    # A stale priority request can fit the total card count but cannot fit
+    # either logical pool. Exercise the daemon's actual claim and reject path.
+    local impossible=task_20260101_000001_1
+    printf '%s %s 0\n' "$(id -un)" "$(( $(date +%s) + 3600 ))" > "$config_dir/taskqueue-priority.conf"
+    printf 'DEVICE=auto:2\nDEVICE_ALLOCATION_POOLS=0;1\nCOMMAND=false\n' > "$state/pending/$impossible"
+    touch "$state/pending/$impossible.env"
+    printf 'DEVICE=none\n' > "$state/pending/task_20260101_000002_2"
     DYNAMIC_TEST_CONFIG_DIR="$config_dir" DYNAMIC_TEST_CONFIG="$config" \
         TASKQUEUE_ALLOW_USER=1 TASKQUEUE_CONF="$config" PATH="$fake_bin:$PATH" \
         bash "$app/task-daemon.sh" &
@@ -282,6 +290,15 @@ EOF
         sleep 0.05
     done
     grep -Fq 'scheduler loaded: mode=future_policy api=2' "$logs/taskqueue.log"
+    for _ in $(seq 1 100); do
+        grep -Fq "considered task_20260101_000002_2" "$logs/taskqueue.log" && break
+        sleep 0.05
+    done
+    grep -Fq "considered task_20260101_000002_2" "$logs/taskqueue.log"
+    grep -Fxq 'ACCOUNTING_STATE=not_started' "$state/done/$impossible"
+    grep -Fxq 'EXIT_CODE=126' "$state/done/$impossible"
+    grep -Fq 'exceeds eligible pool capacity (1)' "$logs/$impossible.log"
+    [[ ! -e "$state/pending/$impossible.env" && ! -e "$state/running/$impossible" ]]
     kill -TERM "$DYNAMIC_DAEMON_PID"
     wait "$DYNAMIC_DAEMON_PID" || true
     DYNAMIC_DAEMON_PID=""
